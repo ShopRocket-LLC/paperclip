@@ -139,3 +139,11 @@ own policy and access review.
 
 Gaps: Agent requests and continued tool use exist; reconnect/revoke/audit management are
 human paths.
+
+
+Opt-in plugin runtime synchronization receives committed changes to connection
+settings, profiles, installs, grants, policies and catalogs. Standing assignment
+metadata is company/agent scoped and contains no credentials. Tool authorization
+and run-scoped gateway credentials remain enforced at execution. See
+[contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#mcp-and-connectors) and
+[database coverage](../../server/src/__tests__/agent-runtime-connectors.test.ts).

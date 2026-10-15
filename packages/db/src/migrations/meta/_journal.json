@@ -2430,6 +2430,13 @@
       "when": 1792101163248,
       "tag": "0348_agent_skill_runtime_hooks",
       "breakpoints": true
+    },
+    {
+      "idx": 349,
+      "version": "7",
+      "when": 1792101942684,
+      "tag": "0349_agent_connector_runtime_hooks",
+      "breakpoints": true
     }
   ]
 }

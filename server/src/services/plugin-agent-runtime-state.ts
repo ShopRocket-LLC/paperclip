@@ -4,6 +4,7 @@ import type { PluginAgentRuntimeState } from "@paperclipai/plugin-sdk";
 import { agentRecordQueries } from "../lib/agent-records.js";
 import { conflict, forbidden } from "../errors.js";
 import { agentInstructionsService } from "./agent-instructions.js";
+import { pluginAgentConnectionAssignments } from "./plugin-agent-connections.js";
 import { companySkillService } from "./company-skills.js";
 import { withSkillActor } from "./skill-access.js";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
@@ -11,7 +12,7 @@ import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { agentInstanceSecretService } from "./agent-instance-secrets.js";
 
-async function readState(db: Db, pluginId: string, companyId: string, agentId: string): Promise<Omit<PluginAgentRuntimeState, "skills"> | null> {
+async function readState(db: Db, pluginId: string, companyId: string, agentId: string): Promise<Omit<PluginAgentRuntimeState, "skills" | "connectionAssignments"> | null> {
   return db.transaction(async tx => {
     const [agent] = await tx.select().from(agents)
       .where(and(eq(agents.companyId, companyId), eq(agents.id, agentId))).for("share");
@@ -48,9 +49,10 @@ export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyI
         selectionConfig: state.agent.adapterConfig, includeLegacy: state.agent.adapterType !== "paperclip_runner", snapshotLatest: true,
         versionSelections: skillVersionSelectionMap(preference.desiredSkillEntries, { versionPinsEnabled: settings.enableBetaSkills }),
       }));
+    const connectionAssignments = await pluginAgentConnectionAssignments(db, companyId, agentId, { publicMcp: settings.enablePublicMcp, chatConnectors: settings.enableChatConnectors });
     const current = await readState(db, pluginId, companyId, agentId);
     if (!current) return null;
-    if (current.revision === state.revision) return { ...current, skills };
+    if (current.revision === state.revision) return { ...current, skills, connectionAssignments };
   }
   throw conflict("Agent runtime changed while resolving synchronization inputs; retry");
 }

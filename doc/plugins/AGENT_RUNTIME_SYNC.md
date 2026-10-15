@@ -94,3 +94,34 @@ Pinned assignments receive conservative content invalidations too. Their resolve
 version and bytes stay pinned when pin support is enabled. Consumers can compare
 versions or destination hashes and avoid rewriting unchanged trees. Task-only
 skill mentions and a running task's saved version selection remain task-owned.
+
+
+## MCP and connectors
+
+Migration 0349 records changes to connections, application settings, catalogs,
+installs, profile definitions/entries/bindings, policies, grants, delegation,
+company permissions, named gateway settings, and connector endpoint configuration.
+Referenced credential rotation and revocation also invalidate runtime state.
+These events contain no credential values, phone numbers, or provider payloads.
+
+Connector changes conservatively invalidate eligible agents in the same company.
+A profile can inherit company, project, task, or gateway scope, so an agent-only
+binding lookup is not sufficient for invalidation. Old and new companies are
+covered if a mutation changes ownership. Statement-level transition tables batch
+bulk catalog changes: each company gets one fanout per SQL statement, regardless
+of the number of changed tools. Empty statements and health/use timestamps do
+not create work. Failure to record work rolls back the connector mutation.
+
+The owning runtime reader includes standing company/agent connection installs,
+active profile IDs, and effective public-MCP/chat feature flags. The database
+queries project only identity, name, transport, enabled/status fields, and profile
+IDs. They exclude credential references, arbitrary configuration, and tool schemas.
+The reader fails at 512 connection installs or 128 profiles rather than silently
+truncating its desired state. Revision and ownership are rechecked after reads.
+
+Standing assignments are preparation inputs, not authorization to use a tool.
+Task-scoped profile bindings, responsible-user consent, gateway sessions and
+credentials, automatic connector skill overlays, and connection instructions
+remain in the existing run preparation path. The invalidation covers their
+underlying configuration, but does not fabricate a run identity or activate a
+provider session. A transport consumer must preserve those runtime boundaries.

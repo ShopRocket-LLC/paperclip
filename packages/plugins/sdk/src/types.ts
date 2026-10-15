@@ -1697,7 +1697,14 @@ export interface PluginAgentRuntimeSkill {
   missingDetail?: string | null;
 }
 
+export interface PluginAgentConnectionAssignments {
+  features: { publicMcp: boolean; chatConnectors: boolean };
+  connections: Array<{ id: string; name: string; transport: string; enabled: boolean; status: string }>;
+  profileIds: string[];
+}
+
 export interface PluginAgentRuntimeState {
+  connectionAssignments: PluginAgentConnectionAssignments;
   skills: PluginAgentRuntimeSkill[];
   revision: string;
   agent: Agent;

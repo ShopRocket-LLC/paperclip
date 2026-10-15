@@ -65,3 +65,11 @@ Scope: ui
 Storybook: Mount PermissionsPanel/AppDetail with quarantined actions, selection/review, refresh pending, empty and failed discovery states. Existing auto-allowed NewToolsAllowed examples are not quarantine review.
 Production: Exercise catalog refresh and new-tool review with permitted/denied actors; unreviewed actions stay quarantined, prior Off/Ask choices survive refresh, and approved review persists.
 Sources: Source: [PermissionsPanel.tsx](../../ui/src/pages/apps/app-detail/PermissionsPanel.tsx), [AppDetail.tsx](../../ui/src/pages/apps/AppDetail.tsx), [tool-access.ts](../../server/src/routes/tool-access.ts). Tests: [AppDetail.test.tsx](../../ui/src/pages/apps/AppDetail.test.tsx), [tool-access-service.test.ts](../../server/src/__tests__/tool-access-service.test.ts), [tool-access-policy-service.test.ts](../../server/src/__tests__/tool-access-policy-service.test.ts)
+
+
+Opt-in plugin runtime synchronization receives committed changes to connection
+settings, profiles, installs, grants, policies and catalogs. Standing assignment
+metadata is company/agent scoped and contains no credentials. Tool authorization
+and run-scoped gateway credentials remain enforced at execution. See
+[contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#mcp-and-connectors) and
+[database coverage](../../server/src/__tests__/agent-runtime-connectors.test.ts).
