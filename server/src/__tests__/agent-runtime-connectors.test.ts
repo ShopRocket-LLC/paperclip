@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, companies, companyMemberships, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, connectionGrantMembers, connectionGrantDelegations, userSecretDefinitions, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
+import { agents, companies, companyMemberships, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, connectionGrantMembers, connectionGrantDelegations, userSecretDefinitions, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolPolicies, toolMcpGateways, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { pluginAgentRuntimeState } from "../services/plugin-agent-runtime-state.js";
@@ -11,6 +11,8 @@ import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordin
 import { toolAccessService } from "../services/tool-access.js";
 import { updateAgentConfigurationInTransaction } from "../services/agent-configuration-transaction.js";
 import { accessService } from "../services/access.js";
+import { createToolGatewayService } from "../services/tool-gateway.js";
+import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { secretService } from "../services/secrets.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -138,6 +140,50 @@ describeDatabase("connector runtime synchronization", () => {
     expect(await events()).toHaveLength(before + 4);
     await service.replaceConnectionGrantMembers(connectionId, grant.id, []);
     expect(await events()).toHaveLength(before + 4);
+  });
+  it("serializes named gateways targeting different agents without foreign-key lock upgrades", async () => {
+    const [profile] = await db.insert(toolProfiles).values({ companyId, profileKey: "gateway-fixture", name: "Gateway fixture" }).returning();
+    const [lower, higher] = [agentId, peerId].sort();
+    let locked!: () => void; let release!: () => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const blocker = db.transaction(async tx => {
+      await tx.select().from(agents).where(eq(agents.id, lower)).for("no key update");
+      locked(); await resume;
+    });
+    await held;
+    const pids: number[] = [];
+    const saves = [higher, lower].map((target, index) => db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      pids.push(Number(row.pid));
+      return createToolGatewayService(tx as unknown as Db).createNamedGateway({ companyId, body: { name: `Gateway ${index}`, profileId: profile.id, agentId: target } });
+    }));
+    const completed = Promise.allSettled(saves);
+    try {
+      await vi.waitFor(async () => {
+        expect(pids).toHaveLength(2);
+        const rows = await db.execute(sql`SELECT pid FROM pg_stat_activity WHERE pid IN (${pids[0]}, ${pids[1]}) AND wait_event_type = 'Lock'`);
+        expect(rows).toHaveLength(2);
+      }, { timeout: 5000 });
+    } finally { release(); await blocker; }
+    const results = await completed;
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(await db.select().from(toolMcpGateways).where(eq(toolMcpGateways.companyId, companyId))).toHaveLength(2);
+    expect(await db.select().from(toolProfileBindings).where(eq(toolProfileBindings.companyId, companyId))).toHaveLength(2);
+  }, 15000);
+  it("ignores real trust-rule hits while retaining meaningful rule changes", async () => {
+    const [entry] = await db.insert(toolCatalogEntries).values({ companyId, applicationId, connectionId, name: "Search", toolName: "search", versionHash: "fixture" }).returning();
+    const [rule] = await db.insert(toolPolicies).values({ companyId, name: "Trusted search", policyType: "trust_rule", selectors: { agentId, connectionId, toolName: "search" }, config: { trustRule: { hitCount: 0 } } }).returning();
+    const before = await events();
+    const decision = await toolAccessPolicyService(db).decide({ companyId, actor: { actorType: "agent", actorId: agentId, agentId }, request: { connectionId, catalogEntryId: entry.id, toolName: "search", arguments: {} }, consumeRateLimit: true });
+    expect(decision).toMatchObject({ allowed: true, reasonCode: "allow_trust_rule" });
+    const [used] = await db.select().from(toolPolicies).where(eq(toolPolicies.id, rule.id));
+    expect(used.config).toMatchObject({ trustRule: { hitCount: 1, lastHitAt: expect.any(String) } });
+    expect(await events()).toEqual(before);
+    await db.update(toolPolicies).set({ config: { ...used.config, trustRule: { ...(used.config?.trustRule as object), revokedAt: new Date().toISOString() } } }).where(eq(toolPolicies.id, rule.id));
+    expect(await events()).toHaveLength(before.length + 2);
   });
   it("serializes concurrent delegations before acquiring agent foreign-key locks", async () => {
     await db.insert(companyMemberships).values(["alice", "bob"].map(principalId => ({ companyId, principalType: "user", principalId, status: "active" })));

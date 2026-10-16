@@ -1,3 +1,77 @@
+CREATE OR REPLACE FUNCTION paperclip_record_agent_runtime(p_company uuid, p_agent uuid) RETURNS bigint
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE revision bigint;
+BEGIN
+  PERFORM 1 FROM agents WHERE company_id = p_company AND id = p_agent
+    AND status NOT IN ('pending_approval', 'terminated') FOR NO KEY UPDATE;
+  IF FOUND THEN
+    INSERT INTO resource_lifecycle_events(company_id, resource_type, resource_id, action)
+      VALUES (p_company, 'agent_runtime', p_agent, 'update') RETURNING id INTO revision;
+  END IF;
+  RETURN revision;
+END;
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION paperclip_invalidate_company_agent_runtimes(p_company uuid) RETURNS void
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE candidate uuid;
+BEGIN
+  FOR candidate IN SELECT id FROM agents WHERE company_id = p_company
+    AND status NOT IN ('pending_approval', 'terminated') ORDER BY id FOR NO KEY UPDATE LOOP
+    PERFORM paperclip_record_agent_runtime(p_company, candidate);
+  END LOOP;
+END;
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION paperclip_invalidate_skill_source_runtimes(p_company uuid, sources uuid[]) RETURNS void
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE candidate uuid;
+BEGIN
+  FOR candidate IN SELECT a.id FROM agents a WHERE a.company_id = p_company
+    AND a.status NOT IN ('pending_approval', 'terminated') AND EXISTS (
+      SELECT 1 FROM company_skills s WHERE s.company_id = p_company AND s.access_source_id = ANY(sources)
+        AND paperclip_agent_selects_runtime_skill(a.adapter_config, a.adapter_type, s.key, s.slug))
+    ORDER BY a.id FOR NO KEY UPDATE LOOP
+    PERFORM paperclip_record_agent_runtime(p_company, candidate);
+  END LOOP;
+END;
+$$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION paperclip_skill_runtime_changed() RETURNS trigger
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE previous jsonb; current jsonb; keys text[]; company uuid; candidate uuid;
+BEGIN
+  IF TG_OP <> 'INSERT' THEN previous := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN current := to_jsonb(NEW); END IF;
+  IF TG_OP = 'UPDATE' AND
+    jsonb_build_array(OLD.key, OLD.slug, OLD.markdown, OLD.source_type, OLD.source_locator, OLD.source_ref,
+      OLD.file_inventory, OLD.current_version_id, OLD.access_source_id, OLD.compatibility, OLD.trust_level, OLD.metadata)
+    IS NOT DISTINCT FROM
+    jsonb_build_array(NEW.key, NEW.slug, NEW.markdown, NEW.source_type, NEW.source_locator, NEW.source_ref,
+      NEW.file_inventory, NEW.current_version_id, NEW.access_source_id, NEW.compatibility, NEW.trust_level, NEW.metadata)
+    THEN RETURN NEW; END IF;
+  company := coalesce((current->>'company_id')::uuid, (previous->>'company_id')::uuid);
+  SELECT array_agg(DISTINCT lower(reference)) INTO keys FROM (
+    SELECT row->>'key' AS reference FROM unnest(ARRAY[previous, current]) row
+    UNION ALL SELECT regexp_replace(row->>'key', '.*/', '') FROM unnest(ARRAY[previous, current]) row
+    UNION ALL SELECT CASE WHEN row->>'key' LIKE 'paperclipai/paperclip/%' THEN row->>'slug'
+      ELSE (row->>'slug') || '--' || left(encode(sha256(convert_to(row->>'key', 'UTF8')), 'hex'), 10) END
+      FROM unnest(ARRAY[previous, current]) row
+  ) refs WHERE reference IS NOT NULL;
+  FOR candidate IN SELECT a.id FROM agents a WHERE a.company_id = company
+    AND a.status NOT IN ('pending_approval', 'terminated') AND (
+      (a.adapter_type <> 'paperclip_runner' AND keys && ARRAY['paperclipai/paperclip/paperclip', 'paperclipai/paperclip/complain', 'paperclipai/paperclip/suggestion-box']) OR
+      EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a.adapter_config#>'{paperclipSkillSync,desiredSkills}') = 'array'
+        THEN a.adapter_config#>'{paperclipSkillSync,desiredSkills}' ELSE '[]'::jsonb END) choice
+        WHERE lower(trim(CASE WHEN jsonb_typeof(choice) = 'string' THEN choice#>>'{}' ELSE choice->>'key' END)) = ANY(keys)))
+    ORDER BY a.id FOR NO KEY UPDATE LOOP
+    PERFORM paperclip_record_agent_runtime(company, candidate);
+  END LOOP;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION paperclip_invalidate_connector_company(p_company uuid) RETURNS void
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE setting text := 'paperclip.runtime_' || replace(p_company::text, '-', '_'); xid text := pg_current_xact_id()::text;
@@ -11,6 +85,7 @@ $$;
 CREATE OR REPLACE FUNCTION paperclip_connector_runtime_changed() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE company uuid; query text; binding record; candidate uuid;
+  old_projection text := '(to_jsonb(o) - $1)'; new_projection text := '(to_jsonb(n) - $1)';
   ignored text[] := ARRAY['updated_at', 'created_at', 'last_used_at', 'last_resolved_at', 'last_health_at',
     'health_status', 'health_checked_at', 'health_message', 'last_catalog_refresh_at', 'last_seen_at', 'last_error', 'last_event_at', 'last_publication_at',
     'last_sync_at', 'sync_checkpoint', 'activation_at', 'lease_token', 'lease_expires_at'];
@@ -34,13 +109,17 @@ BEGIN
     END LOOP;
     RETURN NULL;
   END IF;
+  IF TG_TABLE_NAME = 'tool_policies' THEN
+    old_projection := old_projection || ' #- ''{config,trustRule,hitCount}'' #- ''{config,trustRule,lastHitAt}''';
+    new_projection := new_projection || ' #- ''{config,trustRule,hitCount}'' #- ''{config,trustRule,lastHitAt}''';
+  END IF;
   IF TG_OP = 'INSERT' THEN query := 'SELECT DISTINCT company_id FROM new_rows ORDER BY company_id';
   ELSIF TG_OP = 'DELETE' THEN query := 'SELECT DISTINCT company_id FROM old_rows ORDER BY company_id';
   ELSE query := format('WITH changed AS (
     SELECT o.company_id AS old_company, n.company_id AS new_company FROM old_rows o FULL JOIN new_rows n ON o.%I = n.%I
-    WHERE (to_jsonb(o) - $1) IS DISTINCT FROM (to_jsonb(n) - $1))
+    WHERE %s IS DISTINCT FROM %s)
     SELECT old_company AS company_id FROM changed WHERE old_company IS NOT NULL UNION
-    SELECT new_company AS company_id FROM changed WHERE new_company IS NOT NULL ORDER BY company_id', TG_ARGV[0], TG_ARGV[0]);
+    SELECT new_company AS company_id FROM changed WHERE new_company IS NOT NULL ORDER BY company_id', TG_ARGV[0], TG_ARGV[0], old_projection, new_projection);
   END IF;
   FOR company IN EXECUTE query USING ignored LOOP
     PERFORM paperclip_invalidate_connector_company(company);

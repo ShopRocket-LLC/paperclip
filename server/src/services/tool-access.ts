@@ -15605,6 +15605,9 @@ export function toolAccessService(
         )
         .limit(1)
         .for("update");
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+        .for("update");
       await tx.select({ id: toolConnections.id }).from(toolConnections)
         .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
         .for("update");
@@ -16229,6 +16232,9 @@ export function toolAccessService(
           )
           .limit(1)
         .for("update");
+        await tx.select({ id: toolApplications.id }).from(toolApplications)
+          .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+          .for("update");
         await tx.select({ id: toolConnections.id }).from(toolConnections)
           .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
           .for("update");
@@ -16548,6 +16554,9 @@ export function toolAccessService(
       await tx.select({ id: connectionGrants.id }).from(connectionGrants)
         .where(and(eq(connectionGrants.companyId, connection.companyId), eq(connectionGrants.connectionId, connection.id),
           eq(connectionGrants.kind, "organization"), eq(connectionGrants.isDefault, true)))
+        .for("update");
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
         .for("update");
       await tx.select({ id: toolConnections.id }).from(toolConnections)
         .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
@@ -16943,6 +16952,9 @@ export function toolAccessService(
             .where(and(eq(connectionGrants.companyId, companyId), eq(connectionGrants.connectionId, connection.id),
               or(eq(connectionGrants.id, personalGrant.id), and(eq(connectionGrants.kind, "organization"), eq(connectionGrants.isDefault, true)))))
             .orderBy(connectionGrants.id).for("update");
+          await tx.select({ id: toolApplications.id }).from(toolApplications)
+            .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)))
+            .for("update");
           await tx.select({ id: toolConnections.id }).from(toolConnections)
             .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, companyId)))
             .for("update");

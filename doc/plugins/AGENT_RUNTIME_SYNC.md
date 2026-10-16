@@ -123,7 +123,11 @@ invalidate only their owning agent, avoiding lock inversion with configuration
 saves that already hold that agent's row lock.
 OAuth persistence and membership cleanup lock affected connections before
 credential/access mutations can lock agent runtimes. Existing grants are locked
-before connections; cleanup locks each affected set in ID order.
+before applications and connections; cleanup locks each affected set in ID order.
+Runtime journaling uses `FOR NO KEY UPDATE` on agent rows: writers remain
+serialized while foreign-key reference locks from gateway and assignment inserts
+can coexist. Trust-rule hit counts and last-hit timestamps are bookkeeping;
+changes to the rule itself still refresh runtimes.
 
 Managed feature overlays can change between server starts without a database
 write. Each delivery service therefore journals one baseline refresh per company
