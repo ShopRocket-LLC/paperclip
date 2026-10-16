@@ -8997,6 +8997,69 @@ describeEmbeddedPostgres("tool access service", () => {
     }
   });
 
+  it("orders managed reconnect with refresh and rejects superseded secret writes", async () => {
+    const company = await createCompany(db);
+    await createAgent(db, company.id);
+    const userId = `managed-refresh-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const actor = { actorType: "user" as const, actorId: userId };
+    const connector = fakeGmailConnector(company.id, userId);
+    const refreshDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
+    const definition = getConnectableAppDefinition("gmail")!;
+    const availability = definition.ownershipAvailability;
+    definition.ownershipAvailability = { ...availability, platform_shared: true };
+    mockToolsList([]);
+    let allowRefresh!: () => void; let allowReconnect!: () => void;
+    try {
+      const connected = await service.connectGalleryApp(company.id, { galleryKey: "gmail", connectionMethodKey: "paperclip-draft", grantKind: "user", name: "Managed concurrent refresh" }, actor);
+      const start = () => service.startOAuth(company.id, connected.connectionId, { redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback", actor });
+      const initial = await start();
+      await service.completePaperclipCloudConnectorCallback({ state: new URL(initial.authorizationUrl).searchParams.get("state")!, claimId: "initial", actor });
+      const [grant] = await db.select().from(connectionGrants).where(and(eq(connectionGrants.connectionId, connected.connectionId), eq(connectionGrants.subjectUserId, userId)));
+      const accessId = grant.credentialSecretRefs.find(ref => ref.configPath === "oauth.access_token")!.secretId;
+      const [before] = await db.select().from(companySecrets).where(eq(companySecrets.id, accessId));
+      const reconnect = await start();
+      const credentials = await connector.refresh({ subject: userId, companyId: company.id, profile: "gmail.draft", refreshToken: "fixture" });
+      let refreshing!: () => void;
+      const providerCalled = new Promise<void>(resolve => { refreshing = resolve; });
+      const mayRefresh = new Promise<void>(resolve => { allowRefresh = resolve; });
+      vi.mocked(connector.refresh).mockImplementation(async () => { refreshing(); await mayRefresh; return credentials; });
+      const [backend] = await refreshDb.execute(sql`SELECT pg_backend_pid() AS pid`);
+      const refresh = createTestToolAccessService(refreshDb, { paperclipCloudConnector: connector }).refreshOAuthGrantCredentials({ companyId: company.id, connectionId: connected.connectionId, grantId: grant.id, forceRefresh: true, actor });
+      const refreshResult = Promise.allSettled([refresh]);
+      await providerCalled;
+      let locked!: () => void;
+      const held = new Promise<void>(resolve => { locked = resolve; });
+      const mayReconnect = new Promise<void>(resolve => { allowReconnect = resolve; });
+      const callback = db.transaction(async tx => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+        await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+        locked(); await mayReconnect;
+        return createTestToolAccessService(tx as unknown as Db, { paperclipCloudConnector: connector }).completePaperclipCloudConnectorCallback({ state: new URL(reconnect.authorizationUrl).searchParams.get("state")!, claimId: "reconnect", actor });
+      });
+      const callbackResult = Promise.allSettled([callback]);
+      await held;
+      allowRefresh();
+      try {
+        await vi.waitFor(async () => {
+          const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${Number(backend.pid)}`);
+          expect(row.wait_event_type).toBe("Lock");
+        }, { timeout: 5000 });
+      } finally { allowReconnect(); }
+      const [completion] = await callbackResult;
+      if (completion.status === "rejected") throw completion.reason;
+      const [refreshCompletion] = await refreshResult;
+      expect(refreshCompletion).toMatchObject({ status: "rejected", reason: { status: 409, details: { code: "oauth_refresh_superseded", retryable: true } } });
+      expect((await db.select().from(companySecrets).where(eq(companySecrets.id, accessId)))[0].latestVersion).toBe(before.latestVersion + 1);
+      expect((await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)))[0].status).toBe("active");
+    } finally {
+      allowRefresh?.(); allowReconnect?.();
+      definition.ownershipAvailability = availability;
+      await refreshDb.$client.end({ timeout: 0 }).catch(() => undefined);
+    }
+  }, 20000);
+
   it("keeps brokered OAuth state retryable until credentials are durably stored", async () => {
     const company = await createCompany(db);
     const userId = `gmail-retry-${randomUUID()}`;

@@ -11486,6 +11486,14 @@ export function toolAccessService(
               },
             };
             const updated = await db.transaction(async (tx) => {
+              const [current] = await tx.select({ id: connectionGrants.id }).from(connectionGrants)
+                .where(and(eq(connectionGrants.id, grant.id), eq(connectionGrants.companyId, grant.companyId),
+                  eq(connectionGrants.status, "active"),
+                  sql`${connectionGrants.providerTenant} -> 'oauth' -> 'refreshLease' ->> 'id' = ${lease.leaseId}`))
+                .for("update");
+              if (!current) throw conflict("OAuth credentials changed while refresh was in progress", {
+                code: "oauth_refresh_superseded", retryable: true,
+              });
               const txSecrets = secretService(tx);
               await txSecrets.rotate(
                 accessRef.secretId,
