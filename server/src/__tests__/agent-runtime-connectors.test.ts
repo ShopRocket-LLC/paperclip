@@ -375,6 +375,48 @@ describeDatabase("connector runtime synchronization", () => {
     expect((await toolAccessService(db).listConnectionInstalls(connectionId, companyId)).map(install => install.targetId).sort()).toEqual([agentId, peerId].sort());
     if (caller === "connection intent") expect((results[1] as PromiseFulfilledResult<{ status: string }>).value.status).toBe("accepted");
   }, 15000);
+  it("orders managed policy reorder with install saves by policy ID", async () => {
+    await db.update(toolConnections).set({ config: { mcpAgentAccessConfigured: true } }).where(eq(toolConnections.id, connectionId));
+    await db.insert(toolProfiles).values({ companyId, profileKey: `app:${connectionId}`, name: "Install profile" });
+    const [lower, higher] = [randomUUID(), randomUUID()].sort();
+    await db.insert(toolPolicies).values([higher, lower].map((id, index) => ({ id, companyId, name: `Managed policy ${index}`, policyType: "require_approval", priority: (index + 1) * 100, config: { source: "app_gallery_finish", connectionId } })));
+    let locked!: () => void; let release!: () => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const blocker = db.transaction(async tx => {
+      await tx.select().from(toolPolicies).where(eq(toolPolicies.id, lower)).for("no key update");
+      locked(); await resume;
+    });
+    await held;
+    const pids: number[] = [];
+    const run = (work: (client: Db) => Promise<unknown>, sequentialScan = false) => db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      if (sequentialScan) {
+        await tx.execute(sql`SET LOCAL enable_indexscan = off`);
+        await tx.execute(sql`SET LOCAL enable_bitmapscan = off`);
+      }
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      pids.push(Number(row.pid));
+      return work(tx as unknown as Db);
+    });
+    const waitForLock = (index: number) => vi.waitFor(async () => {
+      expect(pids.length).toBeGreaterThan(index);
+      const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pids[index]}`);
+      expect(row.wait_event_type).toBe("Lock");
+    }, { timeout: 5000 });
+    const install = run(client => toolAccessService(client).putConnectionInstalls(connectionId, { installs: [{ targetType: "agent", targetId: peerId }] }));
+    let reorder: Promise<unknown> | undefined;
+    try {
+      await waitForLock(0);
+      reorder = run(client => toolAccessPolicyService(client).reorderPolicies(companyId, { policyIds: [lower, higher] }), true);
+      await waitForLock(1);
+    } finally { release(); await blocker; }
+    const results = await Promise.allSettled([install, reorder]);
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect((await toolAccessPolicyService(db).listPolicies(companyId)).map(policy => [policy.id, policy.priority])).toEqual([[lower, 100], [higher, 200]]);
+    expect((await toolAccessService(db).listConnectionInstalls(connectionId, companyId)).map(install => install.targetId)).toEqual([peerId]);
+  }, 15000);
   it("ignores real trust-rule hits while retaining meaningful rule changes", async () => {
     const [entry] = await db.insert(toolCatalogEntries).values({ companyId, applicationId, connectionId, name: "Search", toolName: "search", versionHash: "fixture" }).returning();
     const [rule] = await db.insert(toolPolicies).values({ companyId, name: "Trusted search", policyType: "trust_rule", selectors: { agentId, connectionId, toolName: "search" }, config: { trustRule: { hitCount: 0 } } }).returning();

@@ -118,6 +118,7 @@ sync locks its application and then connection before catalog/profile rows and
 runtime journal locks,
 matching action finalization while preserving per-chunk commits. Existing managed
 profiles and policies are locked before binding changes can lock agent runtimes.
+Policy reorder locks its non-trust rows in the same ID order before changing priorities.
 Empty statements, unchanged rediscovery,
 health results, and use/publication timestamps do not create work. Failure to
 record work rolls back the connector mutation.
