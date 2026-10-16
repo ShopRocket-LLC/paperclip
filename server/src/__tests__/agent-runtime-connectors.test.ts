@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, companies, companyMemberships, companySecrets, companySecretBindings, connectionGrants, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
+import { agents, companies, companyMemberships, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { pluginAgentRuntimeState } from "../services/plugin-agent-runtime-state.js";
@@ -10,6 +10,7 @@ import { registerPluginLifecycleDelivery } from "../services/plugin-lifecycle-de
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
 import { toolAccessService } from "../services/tool-access.js";
 import { updateAgentConfigurationInTransaction } from "../services/agent-configuration-transaction.js";
+import { secretService } from "../services/secrets.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
@@ -61,6 +62,43 @@ describeDatabase("connector runtime synchronization", () => {
     expect(connection.healthStatus).not.toBe("unknown");
     expect(connection.healthCheckedAt).not.toBeNull();
     expect(await events()).toEqual(before);
+  });
+  it.each([250, 2500])("batches a real %i-tool catalog refresh and ignores unchanged rediscovery", async count => {
+    const tools = Array.from({ length: count }, (_, index) => ({ name: `search_${index}`, description: "Search fixture records", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } }));
+    await db.update(toolConnections).set({ config: { url: "https://mcp.example.test/mcp" } }).where(eq(toolConnections.id, connectionId));
+    const service = toolAccessService(db, {
+      remoteHttpEndpointLookup: async () => [{ address: "8.8.8.8", family: 4 }],
+      remoteHttpRequest: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: body.method === "initialize" ? { protocolVersion: "2025-06-18" } : { tools } }), { headers: { "content-type": "application/json" } });
+      },
+    });
+    const before = (await events()).length;
+    expect((await service.refreshCatalog(connectionId)).catalog).toHaveLength(count);
+    const after = (await events()).length;
+    expect(after - before).toBeGreaterThanOrEqual(2);
+    expect(after - before).toBeLessThanOrEqual(count === 250 ? 12 : 24);
+    const first = await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connectionId)).orderBy(toolCatalogEntries.toolName);
+    expect((await service.refreshCatalog(connectionId)).catalog).toHaveLength(count);
+    expect(await events()).toHaveLength(after);
+    const second = await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connectionId)).orderBy(toolCatalogEntries.toolName);
+    expect(second.map(row => [row.id, row.firstSeenAt, row.status])).toEqual(first.map(row => [row.id, row.firstSeenAt, row.status]));
+  });
+  it("captures referenced vault configuration and disablement through the real provider service", async () => {
+    const [vault] = await db.insert(companySecretProviderConfigs).values({ companyId, provider: "aws_secrets_manager", displayName: "Fixture vault", config: { region: "us-east-1" } }).returning();
+    const [secret] = await db.insert(companySecrets).values({ companyId, provider: "aws_secrets_manager", providerConfigId: vault.id, key: "vault", name: "Vault fixture" }).returning();
+    await db.update(toolConnections).set({ credentialSecretRefs: [{ secretId: secret.id, configPath: "token" }] }).where(eq(toolConnections.id, connectionId));
+    const before = (await events()).length;
+    await db.update(companySecretProviderConfigs).set({ healthStatus: "ok", healthCheckedAt: new Date(), healthDetails: { fixture: true } }).where(eq(companySecretProviderConfigs.id, vault.id));
+    expect(await events()).toHaveLength(before);
+    await secretService(db).updateProviderConfig(vault.id, { config: { region: "us-west-2" } });
+    expect(await events()).toHaveLength(before + 2);
+    await secretService(db).disableProviderConfig(vault.id);
+    expect(await events()).toHaveLength(before + 4);
+    const [unrelated] = await db.insert(companySecretProviderConfigs).values({ companyId, provider: "local_encrypted", displayName: "Unreferenced vault" }).returning();
+    await secretService(db).disableProviderConfig(unrelated.id);
+    expect(await events()).toHaveLength(before + 4);
   });
   it("skips unchanged grant audiences and coalesces replacements to one company refresh per transaction", async () => {
     await db.insert(companyMemberships).values(["alice", "bob"].map(principalId => ({ companyId, principalType: "user", principalId, status: "active" })));

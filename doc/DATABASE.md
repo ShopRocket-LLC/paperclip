@@ -966,10 +966,12 @@ signals continue to serve other delivery queues. See
 
 
 Migrations 0348 and 0349 extend the runtime stream to installed skills and
-connector configuration. Skill content targets referencing agents. Inherited
-access and connector configuration conservatively invalidate eligible agents
-within the company. Connector triggers use statement transition tables to avoid
-per-tool fanout during catalog refresh. Referenced secret version/status changes
+connector configuration. Skill content and source access target referencing
+agents. Company skill policy and connector configuration conservatively invalidate
+eligible agents within the company; agent secret bindings target their owner.
+Connector triggers use statement transition tables and the real catalog publisher
+uses 500-tool chunks to avoid per-tool fanout. Referenced secret and vault
+configuration/status changes
 record only content-free invalidation. Neither secret material nor grant payloads
 enter the resource journal. Runtime counters and source polling bookkeeping stay
 outside the invalidation boundary.

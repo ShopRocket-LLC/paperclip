@@ -102,6 +102,8 @@ Migration 0349 records changes to connections, application settings, catalogs,
 installs, profile definitions/entries/bindings, policies, grants, delegation,
 company permissions, named gateway settings, and connector endpoint configuration.
 Referenced credential rotation and revocation also invalidate runtime state.
+Vault configuration and status changes invalidate companies whose connector
+credentials reference that vault; vault health checks do not.
 These events contain no credential values, phone numbers, or provider payloads.
 
 Connector changes conservatively invalidate eligible agents in the same company.
@@ -109,8 +111,11 @@ A profile can inherit company, project, task, or gateway scope, so an agent-only
 binding lookup is not sufficient for invalidation. Old and new companies are
 covered if a mutation changes ownership. Statement-level transition tables batch
 bulk catalog changes: each company gets one fanout per transaction, regardless
-of the number of changed tools. Empty statements, health results, and use/publication timestamps do
-not create work. Failure to record work rolls back the connector mutation.
+of the number of changed tools. The real catalog publisher writes chunks of
+500 tools, preserving IDs, first-seen timestamps, and review choices while
+staying within SQL parameter limits. Empty statements, unchanged rediscovery,
+health results, and use/publication timestamps do not create work. Failure to
+record work rolls back the connector mutation.
 Unchanged grant audiences retain their existing rows after membership validation.
 User-scoped audiences can affect task-time access for any company agent, so changed
 audiences conservatively refresh the company once. Agent secret bindings instead

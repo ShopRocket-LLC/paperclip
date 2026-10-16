@@ -7780,7 +7780,7 @@ export function toolAccessService(
       await db.update(toolCatalogEntries).set({ status: "disabled", updatedAt: refreshedAt })
         .where(and(eq(toolCatalogEntries.connectionId, connection.id), inArray(toolCatalogEntries.id, blockedRailwayEntryIds)));
     }
-    const updatedEntries: ToolCatalogEntry[] = [];
+    const catalogValues: Array<typeof toolCatalogEntries.$inferInsert> = [];
     let quarantinedCount = 0;
     const sourceTemplateKey =
       typeof asRecord(connection.config).sourceTemplateKey === "string"
@@ -7844,69 +7844,36 @@ export function toolAccessService(
               : "active";
       if (shouldQuarantine && !providerPermanentlyBlocked) quarantinedCount += 1;
 
-      if (existing) {
-        const [updated] = await db
-          .update(toolCatalogEntries)
-          .set({
-            title: descriptor.title ?? null,
-            description: descriptor.description ?? null,
-            inputSchema: descriptor.inputSchema ?? {},
-            annotations: descriptor.annotations ?? {},
-            riskLevel,
-            isReadOnly: riskLevel === "read",
-            isWrite: riskLevel === "write",
-            isDestructive: riskLevel === "destructive",
-            status,
-            versionHash: hash,
-            schemaHash,
-            lastSeenAt: refreshedAt,
-            quarantinedAt:
-              status === "quarantined"
-                ? shouldQuarantine
-                  ? refreshedAt
-                  : existing.quarantinedAt
-                : null,
-            quarantineReason:
-              status === "quarantined"
-                ? shouldQuarantine
-                  ? "pending_review"
-                  : existing.quarantineReason
-                : null,
-            updatedAt: refreshedAt,
-          })
-          .where(eq(toolCatalogEntries.id, existing.id))
-          .returning();
-        updatedEntries.push(toCatalogEntry(updated));
-      } else {
-        const [created] = await db
-          .insert(toolCatalogEntries)
-          .values({
-            companyId: connection.companyId,
-            applicationId: connection.applicationId,
-            connectionId: connection.id,
-            name: descriptor.name,
-            toolName: descriptor.name,
-            entryKind: "tool",
-            title: descriptor.title ?? null,
-            description: descriptor.description ?? null,
-            inputSchema: descriptor.inputSchema ?? {},
-            annotations: descriptor.annotations ?? {},
-            riskLevel,
-            isReadOnly: riskLevel === "read",
-            isWrite: riskLevel === "write",
-            isDestructive: riskLevel === "destructive",
-            status,
-            versionHash: hash,
-            schemaHash,
-            firstSeenAt: refreshedAt,
-            lastSeenAt: refreshedAt,
-            quarantinedAt: shouldQuarantine ? refreshedAt : null,
-            quarantineReason: shouldQuarantine ? "pending_review" : null,
-          })
-          .returning();
-        updatedEntries.push(toCatalogEntry(created));
-      }
+      catalogValues.push({
+        id: existing?.id, companyId: connection.companyId, applicationId: connection.applicationId,
+        connectionId: connection.id, name: existing?.name ?? descriptor.name, toolName: descriptor.name, entryKind: "tool",
+        title: descriptor.title ?? null, description: descriptor.description ?? null,
+        inputSchema: descriptor.inputSchema ?? {}, annotations: descriptor.annotations ?? {}, riskLevel,
+        isReadOnly: riskLevel === "read", isWrite: riskLevel === "write", isDestructive: riskLevel === "destructive",
+        status, versionHash: hash, schemaHash, firstSeenAt: existing?.firstSeenAt ?? refreshedAt, lastSeenAt: refreshedAt,
+        quarantinedAt: existing
+          ? status === "quarantined" ? shouldQuarantine ? refreshedAt : existing.quarantinedAt : null
+          : shouldQuarantine ? refreshedAt : null,
+        quarantineReason: existing
+          ? status === "quarantined" ? shouldQuarantine ? "pending_review" : existing.quarantineReason : null
+          : shouldQuarantine ? "pending_review" : null,
+        updatedAt: existing ? refreshedAt : new Date(),
+      });
     }
+    const catalogRows: Array<typeof toolCatalogEntries.$inferSelect> = [];
+    for (let index = 0; index < catalogValues.length; index += 500) {
+      catalogRows.push(...await db.insert(toolCatalogEntries).values(catalogValues.slice(index, index + 500))
+      .onConflictDoUpdate({ target: [toolCatalogEntries.connectionId, toolCatalogEntries.name], set: {
+        title: sql`excluded.title`, description: sql`excluded.description`, inputSchema: sql`excluded.input_schema`,
+        annotations: sql`excluded.annotations`, riskLevel: sql`excluded.risk_level`, isReadOnly: sql`excluded.is_read_only`,
+        isWrite: sql`excluded.is_write`, isDestructive: sql`excluded.is_destructive`,
+        status: sql`CASE WHEN ${toolCatalogEntries.status} = 'disabled' AND ${toolCatalogEntries.quarantineReason} IS DISTINCT FROM 'mcp_tool_removed' THEN 'disabled' ELSE excluded.status END`,
+        versionHash: sql`excluded.version_hash`, schemaHash: sql`excluded.schema_hash`, lastSeenAt: sql`excluded.last_seen_at`,
+        quarantinedAt: sql`excluded.quarantined_at`, quarantineReason: sql`excluded.quarantine_reason`, updatedAt: sql`excluded.updated_at`,
+      } }).returning());
+    }
+    const catalogByName = new Map(catalogRows.map(row => [row.toolName, row]));
+    const updatedEntries = descriptors.map(descriptor => toCatalogEntry(catalogByName.get(descriptor.name)!));
 
     const preserveQuarantine =
       isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection);

@@ -12,7 +12,7 @@ CREATE OR REPLACE FUNCTION paperclip_connector_runtime_changed() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE company uuid; query text; binding record; candidate uuid;
   ignored text[] := ARRAY['updated_at', 'created_at', 'last_used_at', 'last_resolved_at', 'last_health_at',
-    'health_status', 'health_checked_at', 'health_message', 'last_catalog_refresh_at', 'last_error', 'last_event_at', 'last_publication_at',
+    'health_status', 'health_checked_at', 'health_message', 'last_catalog_refresh_at', 'last_seen_at', 'last_error', 'last_event_at', 'last_publication_at',
     'last_sync_at', 'sync_checkpoint', 'activation_at', 'lease_token', 'lease_expires_at'];
 BEGIN
   IF TG_TABLE_NAME = 'company_secret_bindings' THEN
@@ -68,6 +68,15 @@ BEGIN
 END;
 $$;
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION paperclip_connector_uses_secret(p_company uuid, p_secret uuid) RETURNS boolean
+LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM tool_connections WHERE company_id = p_company AND (
+      credential_refs @> jsonb_build_array(jsonb_build_object('secretId', p_secret::text)) OR
+      credential_secret_refs @> jsonb_build_array(jsonb_build_object('secretId', p_secret::text)))) OR
+    EXISTS (SELECT 1 FROM connection_grants WHERE company_id = p_company AND
+      credential_secret_refs @> jsonb_build_array(jsonb_build_object('secretId', p_secret::text)));
+$$;
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION paperclip_connector_secret_changed() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE secret uuid; company uuid;
@@ -76,11 +85,7 @@ BEGIN
     IS NOT DISTINCT FROM jsonb_build_array(NEW.status, NEW.latest_version, NEW.deleted_at, NEW.external_ref, NEW.provider_config_id, NEW.provider_metadata) THEN RETURN NEW; END IF;
   IF TG_OP = 'DELETE' THEN secret := OLD.id; company := OLD.company_id;
   ELSE secret := NEW.id; company := NEW.company_id; END IF;
-  IF EXISTS (SELECT 1 FROM tool_connections WHERE company_id = company AND (
-      credential_refs @> jsonb_build_array(jsonb_build_object('secretId', secret::text)) OR
-      credential_secret_refs @> jsonb_build_array(jsonb_build_object('secretId', secret::text)))) OR
-    EXISTS (SELECT 1 FROM connection_grants WHERE company_id = company AND
-      credential_secret_refs @> jsonb_build_array(jsonb_build_object('secretId', secret::text))) THEN
+  IF paperclip_connector_uses_secret(company, secret) THEN
     PERFORM paperclip_invalidate_connector_company(company);
   END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
@@ -91,6 +96,26 @@ $$;
 DROP TRIGGER IF EXISTS paperclip_connector_secret_changed ON company_secrets;
 CREATE TRIGGER paperclip_connector_secret_changed AFTER UPDATE OR DELETE ON company_secrets
   FOR EACH ROW EXECUTE FUNCTION paperclip_connector_secret_changed();
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION paperclip_connector_vault_changed() RETURNS trigger
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE vault uuid; company uuid;
+BEGIN
+  IF TG_OP = 'UPDATE' AND jsonb_build_array(OLD.provider, OLD.status, OLD.config, OLD.is_default, OLD.disabled_at)
+    IS NOT DISTINCT FROM jsonb_build_array(NEW.provider, NEW.status, NEW.config, NEW.is_default, NEW.disabled_at) THEN RETURN NEW; END IF;
+  IF TG_OP = 'DELETE' THEN vault := OLD.id; ELSE vault := NEW.id; END IF;
+  FOR company IN SELECT DISTINCT s.company_id FROM company_secrets s WHERE s.provider_config_id = vault
+    AND paperclip_connector_uses_secret(s.company_id, s.id) ORDER BY s.company_id LOOP
+    PERFORM paperclip_invalidate_connector_company(company);
+  END LOOP;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS paperclip_connector_vault_changed ON company_secret_provider_configs;
+CREATE TRIGGER paperclip_connector_vault_changed AFTER INSERT OR UPDATE OR DELETE ON company_secret_provider_configs
+  FOR EACH ROW EXECUTE FUNCTION paperclip_connector_vault_changed();
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION paperclip_connector_flags_runtime_changed() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
