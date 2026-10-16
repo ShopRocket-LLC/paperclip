@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, or } from "drizzle-orm";
+import { and, asc, eq, isNull, or, sql } from "drizzle-orm";
 import { pluginCompanySettings, pluginConfig, plugins, type Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 import { pluginLifecycleInbox } from "./plugin-lifecycle-inbox.js";
@@ -21,6 +21,7 @@ export function registerPluginLifecycleDelivery(
   let pending = true;
   let disposed = false;
   const retryAt = new Map<string, number>();
+  const refreshedRuntimeCompanies = new Set<string>();
   const retryMs = 30_000;
   const delivery = coordinator.register(DELIVERY_QUEUES.pluginLifecycle, {
     retryMs,
@@ -50,6 +51,10 @@ export function registerPluginLifecycleDelivery(
           const [disabled] = await db.select({ id: pluginCompanySettings.id }).from(pluginCompanySettings)
             .where(and(eq(pluginCompanySettings.pluginId, plugin.id), eq(pluginCompanySettings.companyId, companyId), eq(pluginCompanySettings.enabled, false)));
           if (disabled) continue;
+          if (types.includes("agent_runtime") && !refreshedRuntimeCompanies.has(companyId)) {
+            await db.execute(sql`SELECT paperclip_invalidate_company_agent_runtimes(${companyId}::uuid)`);
+            refreshedRuntimeCompanies.add(companyId);
+          }
           const inbox = pluginLifecycleInbox(db, plugin.id);
           let afterId: string | undefined;
           // Visit independent resources past a failed or deferred head.

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
   agents,
   assets,
@@ -17,6 +17,7 @@ import {
   issueAttachments,
   issueComments,
   issues,
+  resourceLifecycleEvents,
   startEmbeddedPostgresTestDatabase,
   toolApplications,
   toolConnections,
@@ -288,6 +289,15 @@ suite("Teams same-transaction publication projection (real PostgreSQL)", () => {
       endpoint,
     };
   }
+
+  it("does not invalidate agent runtime inputs after a delivered file publication", async () => {
+    const f = await fixture("delivered");
+    const events = () => db.select().from(resourceLifecycleEvents).where(and(eq(resourceLifecycleEvents.companyId, f.companyId), eq(resourceLifecycleEvents.resourceType, "agent_runtime"))).orderBy(resourceLifecycleEvents.id);
+    const before = await events();
+    await f.project();
+    expect((await f.endpoint()).lastPublicationAt).not.toBeNull();
+    expect(await events()).toEqual(before);
+  });
 
   it.each([
     ["consent_pending", "pending"],

@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, companies, companySecrets, connectionGrants, createDb, instanceSettings, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { agents, companies, companySecrets, connectionGrants, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { pluginAgentRuntimeState } from "../services/plugin-agent-runtime-state.js";
+import { pluginLifecycleInbox } from "../services/plugin-lifecycle-inbox.js";
+import { registerPluginLifecycleDelivery } from "../services/plugin-lifecycle-delivery.js";
+import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
+import { toolAccessService } from "../services/tool-access.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
@@ -19,6 +24,7 @@ describeDatabase("connector runtime synchronization", () => {
   let connectionId: string;
   beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("paperclip-runtime-connectors-"); db = createDb(database.connectionString); }, 90_000);
   afterAll(async () => { await database?.cleanup(); });
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(async () => {
     companyId = randomUUID(); agentId = randomUUID(); peerId = randomUUID(); pluginId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Connector runtime fixture", issuePrefix: `C${companyId.slice(0, 6)}` });
@@ -46,6 +52,14 @@ describeDatabase("connector runtime synchronization", () => {
     expect(await events()).toHaveLength(before + 2);
     await db.update(toolCatalogEntries).set({ status: "quarantined" }).where(eq(toolCatalogEntries.connectionId, connectionId));
     expect(await events()).toHaveLength(before + 4);
+  });
+  it("does not invalidate runtime inputs when a real health probe records failure", async () => {
+    const before = await events();
+    await expect(toolAccessService(db).checkHealth(connectionId)).rejects.toThrow();
+    const [connection] = await db.select().from(toolConnections).where(eq(toolConnections.id, connectionId));
+    expect(connection.healthStatus).not.toBe("unknown");
+    expect(connection.healthCheckedAt).not.toBeNull();
+    expect(await events()).toEqual(before);
   });
   it("captures profile assignment and revocation without exposing another agent's assignments", async () => {
     const [profile] = await db.insert(toolProfiles).values({ companyId, profileKey: "fixture", name: "Fixture profile" }).returning();
@@ -101,5 +115,29 @@ describeDatabase("connector runtime synchronization", () => {
     await db.update(instanceSettings).set({ experimental: { enableChatConnectors: true } });
     expect(await events()).toHaveLength(before + 2);
     expect((await pluginAgentRuntimeState(db, pluginId, companyId, agentId))!.connectionAssignments.features).toEqual({ publicMcp: false, chatConnectors: true });
+  });
+  it("refreshes acknowledged runtime state after managed feature overlays change across restarts", async () => {
+    await pluginAgentRuntimeState(db, pluginId, companyId, agentId);
+    await db.insert(pluginConfig).values({ pluginId, companyId, configJson: {} });
+    const inbox = pluginLifecycleInbox(db, pluginId);
+    for (const event of await events()) await inbox.acknowledge(companyId, String(event.id));
+    for (const enabled of [true, false]) {
+      vi.stubEnv("PAPERCLIP_MANAGED_CONFIG", JSON.stringify({ v: 1, mode: "cloud", catalogVersion: "2026.720.0", features: { enablePublicMcp: enabled, enableChatConnectors: enabled }, plugins: { autoInstall: [] } }));
+      const before = (await events()).length;
+      const snapshots: Array<{ publicMcp: boolean; chatConnectors: boolean }> = [];
+      const call = vi.fn(async (_plugin, _method, event) => {
+        const state = await pluginAgentRuntimeState(db, pluginId, companyId, event.resourceId);
+        snapshots.push(state!.connectionAssignments.features);
+        return { eventId: event.id, status: "acknowledged" };
+      });
+      const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, onError: error => { throw error; } });
+      const delivery = registerPluginLifecycleDelivery(coordinator, db, { call, isRunning: () => true, onConfigApplied: () => () => {} } as never, new EventEmitter() as never);
+      try {
+        await delivery.ready;
+        await vi.waitFor(() => expect(snapshots).toEqual(Array(2).fill({ publicMcp: enabled, chatConnectors: enabled })), { timeout: 5000 });
+        await vi.waitFor(async () => expect(await inbox.list(companyId, 100, undefined, ["agent_runtime"])).toEqual([]), { timeout: 5000 });
+        expect(await events()).toHaveLength(before + 2);
+      } finally { delivery.dispose(); await coordinator.stop(); }
+    }
   });
 });

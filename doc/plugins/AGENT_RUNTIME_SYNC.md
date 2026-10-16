@@ -109,8 +109,16 @@ A profile can inherit company, project, task, or gateway scope, so an agent-only
 binding lookup is not sufficient for invalidation. Old and new companies are
 covered if a mutation changes ownership. Statement-level transition tables batch
 bulk catalog changes: each company gets one fanout per SQL statement, regardless
-of the number of changed tools. Empty statements and health/use timestamps do
+of the number of changed tools. Empty statements, health results, and use/publication timestamps do
 not create work. Failure to record work rolls back the connector mutation.
+
+Managed feature overlays can change between server starts without a database
+write. Each delivery service therefore journals one baseline refresh per company
+when an enabled runtime subscriber is first admitted. This runs in background
+delivery, respects standby/idle admission, and also covers a subscriber enabled
+later. It conservatively refreshes unchanged inputs once per process; consumers
+can skip identical materialization. No recurring scan or persisted managed
+configuration is required.
 
 The owning runtime reader includes standing company/agent connection installs,
 active profile IDs, and effective public-MCP/chat feature flags. The database

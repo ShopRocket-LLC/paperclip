@@ -2,7 +2,7 @@ CREATE OR REPLACE FUNCTION paperclip_connector_runtime_changed() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE company uuid; query text;
   ignored text[] := ARRAY['updated_at', 'created_at', 'last_used_at', 'last_resolved_at', 'last_health_at',
-    'health_checked_at', 'health_message', 'last_catalog_refresh_at', 'last_error', 'last_event_at',
+    'health_status', 'health_checked_at', 'health_message', 'last_catalog_refresh_at', 'last_error', 'last_event_at', 'last_publication_at',
     'last_sync_at', 'sync_checkpoint', 'activation_at', 'lease_token', 'lease_expires_at'];
 BEGIN
   IF TG_OP = 'INSERT' THEN query := 'SELECT DISTINCT company_id FROM new_rows ORDER BY company_id';
