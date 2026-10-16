@@ -1,10 +1,39 @@
+CREATE OR REPLACE FUNCTION paperclip_invalidate_connector_company(p_company uuid) RETURNS void
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE setting text := 'paperclip.runtime_' || replace(p_company::text, '-', '_'); xid text := pg_current_xact_id()::text;
+BEGIN
+  IF current_setting(setting, true) IS NOT DISTINCT FROM xid THEN RETURN; END IF;
+  PERFORM paperclip_invalidate_company_agent_runtimes(p_company);
+  PERFORM set_config(setting, xid, true);
+END;
+$$;
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION paperclip_connector_runtime_changed() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
-DECLARE company uuid; query text;
+DECLARE company uuid; query text; binding record; candidate uuid;
   ignored text[] := ARRAY['updated_at', 'created_at', 'last_used_at', 'last_resolved_at', 'last_health_at',
     'health_status', 'health_checked_at', 'health_message', 'last_catalog_refresh_at', 'last_error', 'last_event_at', 'last_publication_at',
     'last_sync_at', 'sync_checkpoint', 'activation_at', 'lease_token', 'lease_expires_at'];
 BEGIN
+  IF TG_TABLE_NAME = 'company_secret_bindings' THEN
+    IF TG_OP = 'INSERT' THEN query := 'SELECT DISTINCT company_id, target_type, target_id FROM new_rows ORDER BY company_id, target_id';
+    ELSIF TG_OP = 'DELETE' THEN query := 'SELECT DISTINCT company_id, target_type, target_id FROM old_rows ORDER BY company_id, target_id';
+    ELSE query := 'WITH changed AS (
+      SELECT to_jsonb(o) AS previous, to_jsonb(n) AS current FROM old_rows o FULL JOIN new_rows n ON o.id = n.id
+      WHERE (to_jsonb(o) - $1) IS DISTINCT FROM (to_jsonb(n) - $1)), targets AS (
+      SELECT previous AS target FROM changed UNION SELECT current FROM changed)
+      SELECT DISTINCT (target->>''company_id'')::uuid AS company_id, target->>''target_type'' AS target_type, target->>''target_id'' AS target_id
+      FROM targets WHERE target IS NOT NULL ORDER BY company_id, target_id';
+    END IF;
+    FOR binding IN EXECUTE query USING ignored LOOP
+      IF binding.target_type = 'agent' THEN
+        SELECT id INTO candidate FROM agents WHERE company_id = binding.company_id AND id::text = binding.target_id;
+        IF FOUND THEN PERFORM paperclip_record_agent_runtime(binding.company_id, candidate); END IF;
+      ELSE PERFORM paperclip_invalidate_connector_company(binding.company_id);
+      END IF;
+    END LOOP;
+    RETURN NULL;
+  END IF;
   IF TG_OP = 'INSERT' THEN query := 'SELECT DISTINCT company_id FROM new_rows ORDER BY company_id';
   ELSIF TG_OP = 'DELETE' THEN query := 'SELECT DISTINCT company_id FROM old_rows ORDER BY company_id';
   ELSE query := format('WITH changed AS (
@@ -14,7 +43,7 @@ BEGIN
     SELECT new_company AS company_id FROM changed WHERE new_company IS NOT NULL ORDER BY company_id', TG_ARGV[0], TG_ARGV[0]);
   END IF;
   FOR company IN EXECUTE query USING ignored LOOP
-    PERFORM paperclip_invalidate_company_agent_runtimes(company);
+    PERFORM paperclip_invalidate_connector_company(company);
   END LOOP;
   RETURN NULL;
 END;
@@ -52,7 +81,7 @@ BEGIN
       credential_secret_refs @> jsonb_build_array(jsonb_build_object('secretId', secret::text)))) OR
     EXISTS (SELECT 1 FROM connection_grants WHERE company_id = company AND
       credential_secret_refs @> jsonb_build_array(jsonb_build_object('secretId', secret::text))) THEN
-    PERFORM paperclip_invalidate_company_agent_runtimes(company);
+    PERFORM paperclip_invalidate_connector_company(company);
   END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
@@ -71,7 +100,7 @@ BEGIN
   IF jsonb_build_array(coalesce(previous->'enablePublicMcp', 'false'::jsonb), coalesce(previous->'enableChatConnectors', 'false'::jsonb))
     IS DISTINCT FROM jsonb_build_array(coalesce(current->'enablePublicMcp', 'false'::jsonb), coalesce(current->'enableChatConnectors', 'false'::jsonb)) THEN
     FOR company IN SELECT DISTINCT company_id FROM agents ORDER BY company_id LOOP
-      PERFORM paperclip_invalidate_company_agent_runtimes(company);
+      PERFORM paperclip_invalidate_connector_company(company);
     END LOOP;
   END IF;
   RETURN NULL;

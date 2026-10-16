@@ -18298,7 +18298,7 @@ export function toolAccessService(
           )
           .for("update");
         const existingAudience = await tx
-          .select({ subjectId: connectionGrantMembers.subjectId })
+          .select()
           .from(connectionGrantMembers)
           .where(
             and(
@@ -18361,6 +18361,8 @@ export function toolAccessService(
             );
           }
         }
+        const existingUserSet = new Set(existingUserIds);
+        if (requested.length === existingUserSet.size && requested.every(id => existingUserSet.has(id))) return existingAudience;
         await tx
           .delete(connectionGrantMembers)
           .where(

@@ -108,9 +108,14 @@ Connector changes conservatively invalidate eligible agents in the same company.
 A profile can inherit company, project, task, or gateway scope, so an agent-only
 binding lookup is not sufficient for invalidation. Old and new companies are
 covered if a mutation changes ownership. Statement-level transition tables batch
-bulk catalog changes: each company gets one fanout per SQL statement, regardless
+bulk catalog changes: each company gets one fanout per transaction, regardless
 of the number of changed tools. Empty statements, health results, and use/publication timestamps do
 not create work. Failure to record work rolls back the connector mutation.
+Unchanged grant audiences retain their existing rows after membership validation.
+User-scoped audiences can affect task-time access for any company agent, so changed
+audiences conservatively refresh the company once. Agent secret bindings instead
+invalidate only their owning agent, avoiding lock inversion with configuration
+saves that already hold that agent's row lock.
 
 Managed feature overlays can change between server starts without a database
 write. Each delivery service therefore journals one baseline refresh per company

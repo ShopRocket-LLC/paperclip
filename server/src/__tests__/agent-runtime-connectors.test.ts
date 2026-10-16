@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, companies, companySecrets, connectionGrants, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
+import { agents, companies, companyMemberships, companySecrets, companySecretBindings, connectionGrants, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { pluginAgentRuntimeState } from "../services/plugin-agent-runtime-state.js";
@@ -9,6 +9,7 @@ import { pluginLifecycleInbox } from "../services/plugin-lifecycle-inbox.js";
 import { registerPluginLifecycleDelivery } from "../services/plugin-lifecycle-delivery.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
 import { toolAccessService } from "../services/tool-access.js";
+import { updateAgentConfigurationInTransaction } from "../services/agent-configuration-transaction.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
@@ -61,6 +62,60 @@ describeDatabase("connector runtime synchronization", () => {
     expect(connection.healthCheckedAt).not.toBeNull();
     expect(await events()).toEqual(before);
   });
+  it("skips unchanged grant audiences and coalesces replacements to one company refresh per transaction", async () => {
+    await db.insert(companyMemberships).values(["alice", "bob"].map(principalId => ({ companyId, principalType: "user", principalId, status: "active" })));
+    const [grant] = await db.insert(connectionGrants).values({ companyId, connectionId, kind: "organization" }).returning();
+    const service = toolAccessService(db);
+    await service.replaceConnectionGrantMembers(connectionId, grant.id, ["alice"]);
+    const before = (await events()).length;
+    expect((await service.replaceConnectionGrantMembers(connectionId, grant.id, ["alice", "alice"])).members).toHaveLength(1);
+    expect(await events()).toHaveLength(before);
+    await service.replaceConnectionGrantMembers(connectionId, grant.id, ["bob"]);
+    expect(await events()).toHaveLength(before + 2);
+    await service.replaceConnectionGrantMembers(connectionId, grant.id, []);
+    expect(await events()).toHaveLength(before + 4);
+    await service.replaceConnectionGrantMembers(connectionId, grant.id, []);
+    expect(await events()).toHaveLength(before + 4);
+  });
+  it("invalidates only the owner of an agent secret binding", async () => {
+    const [secret] = await db.insert(companySecrets).values({ companyId, key: "binding", name: "Binding fixture" }).returning();
+    const before = (await events()).length;
+    const [binding] = await db.insert(companySecretBindings).values({ companyId, secretId: secret.id, targetType: "agent", targetId: agentId, configPath: "env.FIXTURE" }).returning();
+    await db.update(companySecretBindings).set({ versionSelector: "2" }).where(eq(companySecretBindings.id, binding.id));
+    await db.delete(companySecretBindings).where(eq(companySecretBindings.id, binding.id));
+    expect((await events()).slice(before).map(event => event.resourceId)).toEqual([agentId, agentId, agentId]);
+  });
+  it("allows an agent configuration save to finish while a connector refresh waits on that agent", async () => {
+    const higher = [agentId, peerId].sort().at(-1)!;
+    const [secret] = await db.insert(companySecrets).values({ companyId, key: "concurrent", name: "Concurrent fixture" }).returning();
+    await db.insert(companySecretBindings).values({ companyId, secretId: secret.id, targetType: "agent", targetId: higher, configPath: "env.FIXTURE" });
+    let locked!: () => void; let resume!: () => void; let started!: (pid: number) => void;
+    const agentLocked = new Promise<void>(resolve => { locked = resolve; });
+    const maySave = new Promise<void>(resolve => { resume = resolve; });
+    const connectorStarted = new Promise<number>(resolve => { started = resolve; });
+    const save = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      await tx.select().from(agents).where(eq(agents.id, higher)).for("update");
+      locked(); await maySave;
+      await updateAgentConfigurationInTransaction(tx as unknown as Db, higher, { adapterConfig: { env: {} } });
+    });
+    await agentLocked;
+    const connector = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      started(Number(row.pid));
+      await tx.update(toolConnections).set({ enabled: false }).where(eq(toolConnections.id, connectionId));
+    });
+    try {
+      const pid = await connectorStarted;
+      await vi.waitFor(async () => {
+        const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pid}`);
+        expect(row.wait_event_type).toBe("Lock");
+      }, { timeout: 5000 });
+    } finally { resume(); await Promise.all([save, connector]); }
+    expect(await db.select().from(companySecretBindings).where(eq(companySecretBindings.targetId, higher))).toEqual([]);
+    expect((await db.select().from(toolConnections).where(eq(toolConnections.id, connectionId)))[0].enabled).toBe(false);
+  }, 15000);
   it("captures profile assignment and revocation without exposing another agent's assignments", async () => {
     const [profile] = await db.insert(toolProfiles).values({ companyId, profileKey: "fixture", name: "Fixture profile" }).returning();
     const [binding] = await db.insert(toolProfileBindings).values({ companyId, profileId: profile.id, targetType: "agent", targetId: agentId }).returning();
