@@ -173,6 +173,45 @@ describeDatabase("connector runtime synchronization", () => {
     expect(await db.select().from(toolMcpGateways).where(eq(toolMcpGateways.companyId, companyId))).toHaveLength(2);
     expect(await db.select().from(toolProfileBindings).where(eq(toolProfileBindings.companyId, companyId))).toHaveLength(2);
   }, 15000);
+  it.each(["archive", "preserved finish"] as const)("orders %s with application edits before connection mutations", async change => {
+    if (change === "preserved finish") {
+      await db.insert(toolProfiles).values({ companyId, profileKey: `app:${connectionId}`, name: "Preserved profile" });
+      await db.update(toolConnections).set({ config: { sourceTemplateKey: "executor", connectionMethodKey: "mcp", mcpPreserveAccess: true } }).where(eq(toolConnections.id, connectionId));
+    }
+    let locked!: () => void; let release!: () => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const blocker = db.transaction(async tx => {
+      await tx.select().from(toolApplications).where(eq(toolApplications.id, applicationId)).for("update");
+      locked(); await resume;
+    });
+    await held;
+    const pids: number[] = [];
+    const run = (work: (service: ReturnType<typeof toolAccessService>) => Promise<unknown>) => db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      pids.push(Number(row.pid));
+      return work(toolAccessService(tx as unknown as Db));
+    });
+    const waitForLock = (index: number) => vi.waitFor(async () => {
+      expect(pids.length).toBeGreaterThan(index);
+      const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pids[index]}`);
+      expect(row.wait_event_type).toBe("Lock");
+    }, { timeout: 5000 });
+    const edit = run(writer => writer.updateApplication(applicationId, { name: "Edited concurrently" }));
+    let mutation: Promise<unknown> | undefined;
+    try {
+      await waitForLock(0);
+      mutation = run(writer => change === "archive" ? writer.archiveConnection(connectionId, companyId) : writer.finishGalleryAppConnection(companyId, connectionId, { enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: "all_agents" }));
+      await waitForLock(1);
+    } finally { release(); await blocker; }
+    const results = await Promise.allSettled([edit, mutation]);
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    const [application] = await db.select().from(toolApplications).where(eq(toolApplications.id, applicationId));
+    expect(application.name).toBe("Edited concurrently");
+    expect((await toolAccessService(db).getConnection(connectionId, companyId)).status).toBe(change === "archive" ? "archived" : "active");
+  }, 15000);
   it("ignores real trust-rule hits while retaining meaningful rule changes", async () => {
     const [entry] = await db.insert(toolCatalogEntries).values({ companyId, applicationId, connectionId, name: "Search", toolName: "search", versionHash: "fixture" }).returning();
     const [rule] = await db.insert(toolPolicies).values({ companyId, name: "Trusted search", policyType: "trust_rule", selectors: { agentId, connectionId, toolName: "search" }, config: { trustRule: { hitCount: 0 } } }).returning();

@@ -10282,6 +10282,61 @@ describeEmbeddedPostgres("tool access service", () => {
     } else expect((await service.getConnection(connected.connectionId, company.id)).name).toBe("Settings saved concurrently");
   }, 15000);
 
+  it("orders app finishing with OAuth reconnect before either locks the connection", async () => {
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_SECRET", "slack-client-secret");
+    const company = await createCompany(db);
+    const userId = `oauth-sharer-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const service = createTestToolAccessService(db);
+    const actor = { actorType: "user" as const, actorId: userId };
+    const connected = await service.connectGalleryApp(company.id, { galleryKey: "slack", name: "Concurrent sharing", grantKind: "user" }, actor);
+    const connection = await service.getConnection(connected.connectionId, company.id);
+    const redirectUri = "https://paperclip.example/api/tools/oauth/callback";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async url => {
+      const href = String(url);
+      if (href === "https://slack.com/api/oauth.v2.access") return mcpHttpResponse(oauthToken("fixture-access-token", "fixture-refresh-token"));
+      if (href === "https://mcp.slack.com/mcp") return mcpHttpResponse(catalogResponse([{ name: "search_messages", annotations: { readOnlyHint: true } }]));
+      throw new Error(`unexpected fetch ${href}`);
+    });
+    const start = () => service.startOAuth(company.id, connected.connectionId, { redirectUri, actor, subjectUserId: userId });
+    const initial = await start();
+    await service.completeOAuthCallback({ state: new URL(initial.authorizationUrl).searchParams.get("state")!, code: "initial", redirectUri, actor });
+    const reconnect = await start();
+    let locked!: () => void; let release!: () => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const blocker = db.transaction(async tx => {
+      await tx.select().from(toolApplications).where(eq(toolApplications.id, connection.applicationId)).for("update");
+      locked(); await resume;
+    });
+    await held;
+    const pids: number[] = [];
+    const run = (work: (service: ReturnType<typeof createTestToolAccessService>) => Promise<unknown>) => db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      pids.push(Number(row.pid));
+      return work(createTestToolAccessService(tx as unknown as Db));
+    });
+    const waitForLock = (index: number) => vi.waitFor(async () => {
+      expect(pids.length).toBeGreaterThan(index);
+      const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pids[index]}`);
+      expect(row.wait_event_type).toBe("Lock");
+    }, { timeout: 5000 });
+    const callback = run(writer => writer.completeOAuthCallback({ state: new URL(reconnect.authorizationUrl).searchParams.get("state")!, code: "reconnect", redirectUri, actor }));
+    let finishing: Promise<unknown> | undefined;
+    try {
+      await waitForLock(0);
+      finishing = run(writer => writer.finishGalleryAppConnection(company.id, connected.connectionId, { enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: "all_agents" }, actor));
+      await waitForLock(1);
+    } finally { release(); await blocker; }
+    const results = await Promise.allSettled([callback, finishing]);
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(await service.getConnection(connected.connectionId, company.id)).toMatchObject({ credentialPolicy: "per_user", status: "active" });
+    expect(await db.select().from(toolProfiles).where(and(eq(toolProfiles.companyId, company.id), eq(toolProfiles.profileKey, `app:${connected.connectionId}`)))).toHaveLength(1);
+  }, 15000);
+
   it("promotes a personal OAuth identity only after Everyone in the company is chosen", async () => {
     vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
     vi.stubEnv(

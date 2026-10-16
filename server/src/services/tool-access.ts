@@ -6732,6 +6732,9 @@ export function toolAccessService(
       .returning({ id: connectionTokenIssuances.id });
 
     const archived = await db.transaction(async (tx) => {
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+        .for("update");
       const [updatedConnection] = await tx
         .update(toolConnections)
         .set({ status: "archived", enabled: false, updatedAt: now })
@@ -13909,6 +13912,9 @@ export function toolAccessService(
       const config = { ...connection.config };
       delete config.mcpPreserveAccess;
       const updated = await db.transaction(async (tx) => {
+        await tx.select({ id: toolApplications.id }).from(toolApplications)
+          .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)))
+          .for("update");
         const [row] = await tx.update(toolConnections).set({ config, transportConfig: config, status: "active", enabled: true, ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}), updatedAt: new Date() })
           .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, companyId))).returning();
         await tx.update(toolApplications).set({ status: "active", updatedAt: new Date() }).where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)));
@@ -14000,6 +14006,9 @@ export function toolAccessService(
             metadata: { source: "app_gallery_finish" },
           }));
     const transactionResult = await db.transaction(async (tx) => {
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)))
+        .for("update");
       await tx
         .select({ id: toolConnections.id })
         .from(toolConnections)
