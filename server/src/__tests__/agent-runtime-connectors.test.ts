@@ -10,6 +10,7 @@ import { registerPluginLifecycleDelivery } from "../services/plugin-lifecycle-de
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
 import { toolAccessService } from "../services/tool-access.js";
 import { updateAgentConfigurationInTransaction } from "../services/agent-configuration-transaction.js";
+import { accessService } from "../services/access.js";
 import { secretService } from "../services/secrets.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -204,6 +205,42 @@ describeDatabase("connector runtime synchronization", () => {
     expect((await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)))[0].status).toBe("revoked");
     expect(await db.select().from(connectionGrantDelegations).where(eq(connectionGrantDelegations.grantId, grant.id))).toEqual([]);
     await expect(toolAccessService(db).createConnectionGrantDelegation(connectionId, grant.id, peerId, "alice")).rejects.toThrow("Only the active personal grant owner");
+  }, 15000);
+  it.each(["suspended", "archived"] as const)("orders membership %s cleanup with concurrent grant revocation", async status => {
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "owner", membershipRole: "owner", status: "active" });
+    const [member] = await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "alice", membershipRole: "member", status: "active" }).returning();
+    const [grant] = await db.insert(connectionGrants).values({ companyId, connectionId, kind: "user", subjectUserId: "alice" }).returning();
+    await toolAccessService(db).createConnectionGrantDelegation(connectionId, grant.id, agentId, "alice");
+    let locked!: () => void; let resume!: () => void; let started!: (pid: number) => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const mayRevoke = new Promise<void>(resolve => { resume = resolve; });
+    const cleanupStarted = new Promise<number>(resolve => { started = resolve; });
+    const revocation = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+      locked(); await mayRevoke;
+      return toolAccessService(tx as unknown as Db).revokeConnectionGrant(connectionId, grant.id);
+    });
+    await held;
+    const cleanup = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      started(Number(row.pid));
+      const service = accessService(tx as unknown as Db);
+      return status === "suspended" ? service.updateMember(companyId, member.id, { status }) : service.archiveMember(companyId, member.id);
+    });
+    const completed = Promise.allSettled([revocation, cleanup]);
+    try {
+      const pid = await cleanupStarted;
+      await vi.waitFor(async () => {
+        const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pid}`);
+        expect(row.wait_event_type).toBe("Lock");
+      }, { timeout: 5000 });
+    } finally { resume(); }
+    expect((await completed).map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect((await db.select().from(companyMemberships).where(eq(companyMemberships.id, member.id)))[0].status).toBe(status);
+    expect((await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)))[0].status).toBe("revoked");
+    expect(await db.select().from(connectionGrantDelegations).where(eq(connectionGrantDelegations.grantId, grant.id))).toEqual([]);
   }, 15000);
   it("invalidates only the owner of an agent secret binding", async () => {
     const [secret] = await db.insert(companySecrets).values({ companyId, key: "binding", name: "Binding fixture" }).returning();

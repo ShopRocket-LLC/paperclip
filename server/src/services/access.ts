@@ -229,6 +229,14 @@ export function accessService(db: Db) {
     const connectionSecretIdsToRemove = new Set(
       ownedSecretIds.filter((secretId) => !sharedConnectionSecretIds.has(secretId)),
     );
+    const affectedGrantIds = [...new Set([...grantIds, ...grantRefs
+      .filter(grant => affectedConnections.has(grant.connectionId))
+      .map(grant => grant.id)])];
+    if (affectedGrantIds.length > 0) {
+      await tx.select({ id: connectionGrants.id }).from(connectionGrants)
+        .where(and(eq(connectionGrants.companyId, companyId), inArray(connectionGrants.id, affectedGrantIds)))
+        .orderBy(connectionGrants.id).for("update");
+    }
     const removedDelegations = grantIds.length === 0 ? [] : await tx
       .delete(connectionGrantDelegations)
       .where(and(

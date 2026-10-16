@@ -16913,6 +16913,10 @@ export function toolAccessService(
         ];
         const nowAt = new Date();
         await db.transaction(async (tx) => {
+          await tx.select({ id: connectionGrants.id }).from(connectionGrants)
+            .where(and(eq(connectionGrants.companyId, companyId), eq(connectionGrants.connectionId, connection.id),
+              or(eq(connectionGrants.id, personalGrant.id), and(eq(connectionGrants.kind, "organization"), eq(connectionGrants.isDefault, true)))))
+            .orderBy(connectionGrants.id).for("update");
           const [existingOrganizationGrant] = await tx
             .select()
             .from(connectionGrants)
