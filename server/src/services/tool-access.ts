@@ -3065,6 +3065,27 @@ async function gitHubReadGrantAccess(db: Db, companyId: string, connectionId: st
   return { connection, allowed, legacyShared };
 }
 
+async function lockManagedAppPolicies(client: ToolAccessMutationDb, companyId: string, connectionId: string) {
+  await client.select({ id: toolPolicies.id }).from(toolPolicies).where(and(
+    eq(toolPolicies.companyId, companyId), eq(toolPolicies.policyType, "require_approval"),
+    sql`${toolPolicies.config}->>'source' = 'app_gallery_finish'`,
+    sql`${toolPolicies.config}->>'connectionId' = ${connectionId}`,
+  )).orderBy(toolPolicies.id).for("no key update");
+}
+
+export async function lockToolConnectionRuntimeInputs(client: ToolAccessMutationDb, companyId: string, connectionId: string) {
+  await client.select({ id: toolApplications.id }).from(toolApplications)
+    .innerJoin(toolConnections, and(eq(toolConnections.applicationId, toolApplications.id), eq(toolConnections.companyId, toolApplications.companyId)))
+    .where(and(eq(toolConnections.id, connectionId), eq(toolConnections.companyId, companyId)))
+    .for("update", { of: toolApplications });
+  await client.select({ id: toolConnections.id }).from(toolConnections)
+    .where(and(eq(toolConnections.id, connectionId), eq(toolConnections.companyId, companyId))).for("update");
+  await client.select({ id: toolProfiles.id }).from(toolProfiles)
+    .where(and(eq(toolProfiles.companyId, companyId), eq(toolProfiles.profileKey, `app:${connectionId}`)))
+    .for("no key update");
+  await lockManagedAppPolicies(client, companyId, connectionId);
+}
+
 export function toolAccessService(
   db: Db,
   options: ToolAccessServiceOptions = {},
@@ -5621,14 +5642,6 @@ export function toolAccessService(
         ),
       );
     return profile;
-  }
-
-  async function lockManagedAppPolicies(client: ToolAccessMutationDb, companyId: string, connectionId: string) {
-    await client.select({ id: toolPolicies.id }).from(toolPolicies).where(and(
-      eq(toolPolicies.companyId, companyId), eq(toolPolicies.policyType, "require_approval"),
-      sql`${toolPolicies.config}->>'source' = 'app_gallery_finish'`,
-      sql`${toolPolicies.config}->>'connectionId' = ${connectionId}`,
-    )).orderBy(toolPolicies.id).for("no key update");
   }
 
   async function enableCatalogEntriesByDefault(input: {
@@ -18877,15 +18890,7 @@ export function toolAccessService(
         profileId: string;
       }> = [];
       await db.transaction(async (tx) => {
-        await tx.select({ id: toolApplications.id }).from(toolApplications)
-          .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
-          .for("update");
-        await tx.select({ id: toolConnections.id }).from(toolConnections)
-          .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
-          .for("update");
-        await tx.select({ id: toolProfiles.id }).from(toolProfiles)
-          .where(and(eq(toolProfiles.companyId, connection.companyId), eq(toolProfiles.profileKey, `app:${connection.id}`)))
-          .for("no key update");
+        await lockToolConnectionRuntimeInputs(tx, connection.companyId, connection.id);
         if (markMcpAccessConfigured) {
           // Preserve an explicit zero-agent selection through OAuth. Merge the
           // marker in SQL so concurrent credential/config changes are retained.

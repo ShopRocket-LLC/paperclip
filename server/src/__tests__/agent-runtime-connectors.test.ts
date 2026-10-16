@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, companies, companyMemberships, principalPermissionGrants, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, connectionGrantMembers, connectionGrantDelegations, userSecretDefinitions, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolPolicies, toolMcpGateways, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
+import { agents, authUsers, heartbeatRuns, issues, companies, companyMemberships, principalPermissionGrants, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, connectionGrantMembers, connectionGrantDelegations, userSecretDefinitions, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolPolicies, toolMcpGateways, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { pluginAgentRuntimeState } from "../services/plugin-agent-runtime-state.js";
@@ -10,6 +10,8 @@ import { registerPluginLifecycleDelivery } from "../services/plugin-lifecycle-de
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
 import { toolAccessService } from "../services/tool-access.js";
 import { updateAgentConfigurationInTransaction } from "../services/agent-configuration-transaction.js";
+import { connectionIntentService } from "../services/connection-intents.js";
+import { emailConnectionService } from "../services/email-connections.js";
 import { accessService } from "../services/access.js";
 import { createToolGatewayService } from "../services/tool-gateway.js";
 import { toolAccessPolicyService } from "../services/tool-access-policy.js";
@@ -319,6 +321,59 @@ describeDatabase("connector runtime synchronization", () => {
       expect(await accessService(db).getMemberById(companyId, memberId!)).toMatchObject({ membershipRole: "admin" });
       expect(await db.select().from(principalPermissionGrants).where(eq(principalPermissionGrants.companyId, companyId))).toEqual([expect.objectContaining({ permissionKey: "issues:create" })]);
     }
+  }, 15000);
+  it.each(["email allowAgent", "connection intent"] as const)("orders outer %s with direct install saves", async caller => {
+    let outer: (client: Db) => Promise<unknown>;
+    if (caller === "email allowAgent") {
+      await db.update(toolConnections).set({ config: { provider: "agentmail", mcpAgentAccessConfigured: true } }).where(eq(toolConnections.id, connectionId));
+      outer = client => emailConnectionService(client).allowAgent(companyId, connectionId, agentId, { localImplicit: true }, "fixture-setup");
+    } else {
+      const userId = randomUUID(), issueId = randomUUID(), runId = randomUUID();
+      await db.insert(authUsers).values({ id: userId, name: "Fixture user", email: `${userId}@example.test`, createdAt: new Date(), updatedAt: new Date() });
+      await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: userId, status: "active", membershipRole: "member" });
+      await db.insert(issues).values({ id: issueId, companyId, title: "Use Notion", status: "in_progress", assigneeAgentId: agentId });
+      await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "running", responsibleUserId: userId, contextSnapshot: { issueId } });
+      const pending = await connectionIntentService(db).request({ sub: agentId, company_id: companyId, run_id: runId, responsible_user_id: userId, scope: "connection_intents", iat: 1, exp: 2, instance_id: "test" }, "notion");
+      expect(pending.interactionId).toEqual(expect.any(String));
+      await db.update(toolConnections).set({ healthStatus: "ok", config: { sourceTemplateKey: "notion", mcpAgentAccessConfigured: true } }).where(eq(toolConnections.id, connectionId));
+      await db.insert(connectionGrants).values({ companyId, connectionId, kind: "organization", status: "active", isDefault: true });
+      await db.insert(toolCatalogEntries).values({ companyId, applicationId, connectionId, name: "read", toolName: "read", versionHash: "fixture", riskLevel: "read", isReadOnly: true });
+      outer = client => connectionIntentService(client).complete(pending.interactionId!, connectionId, userId, { canManageOrganizationGrant: true });
+    }
+    const [profile] = await db.insert(toolProfiles).values({ companyId, profileKey: `app:${connectionId}`, name: "Shared fixture profile", defaultAction: "allow" }).returning();
+    await db.insert(toolProfileBindings).values({ companyId, profileId: profile.id, targetType: "company", targetId: companyId });
+    let locked!: () => void; let release!: () => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const blocker = db.transaction(async tx => {
+      await tx.select().from(toolApplications).where(eq(toolApplications.id, applicationId)).for("update");
+      locked(); await resume;
+    });
+    await held;
+    const pids: number[] = [];
+    const run = (work: (client: Db) => Promise<unknown>) => db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      pids.push(Number(row.pid));
+      return work(tx as unknown as Db);
+    });
+    const waitForLock = (index: number) => vi.waitFor(async () => {
+      expect(pids.length).toBeGreaterThan(index);
+      const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pids[index]}`);
+      expect(row.wait_event_type).toBe("Lock");
+    }, { timeout: 5000 });
+    const direct = run(client => toolAccessService(client).putConnectionInstalls(connectionId, { installs: [{ targetType: "agent", targetId: peerId }] }));
+    let nested: Promise<unknown> | undefined;
+    try {
+      await waitForLock(0);
+      nested = run(outer);
+      await waitForLock(1);
+    } finally { release(); await blocker; }
+    const results = await Promise.allSettled([direct, nested]);
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect((await toolAccessService(db).listConnectionInstalls(connectionId, companyId)).map(install => install.targetId).sort()).toEqual([agentId, peerId].sort());
+    if (caller === "connection intent") expect((results[1] as PromiseFulfilledResult<{ status: string }>).value.status).toBe("accepted");
   }, 15000);
   it("ignores real trust-rule hits while retaining meaningful rule changes", async () => {
     const [entry] = await db.insert(toolCatalogEntries).values({ companyId, applicationId, connectionId, name: "Search", toolName: "search", versionHash: "fixture" }).returning();

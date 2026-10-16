@@ -130,7 +130,9 @@ OAuth persistence and membership cleanup lock affected connections before
 credential/access mutations can lock agent runtimes. Existing grants are locked
 before applications and connections. App finalization and archival also lock their
 application before the connection. Install changes always take those locks too,
-including an uninstall after access was already configured. Permission-only saves
+including an uninstall after access was already configured. Email setup and
+connection-intent completion take the same locks in their outer transactions;
+completion locks existing grants first. Permission-only saves
 lock the membership before grants, matching role/status saves.
 Cleanup locks each affected set in ID order.
 Runtime journaling uses `FOR NO KEY UPDATE` on agent rows: writers remain

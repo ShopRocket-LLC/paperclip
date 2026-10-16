@@ -15,6 +15,7 @@ import {
   aiConnectionTaskPins,
   companies,
   toolConnections,
+  connectionGrants,
   toolCatalogEntries,
   toolProfiles,
   toolProfileEntries,
@@ -51,7 +52,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import type { RuntimeToolsTokenClaims } from "../runtime-tools-token.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
-import { toolAccessService } from "./tool-access.js";
+import { lockToolConnectionRuntimeInputs, toolAccessService } from "./tool-access.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import { captureRunIdentity } from "./run-identity.js";
 import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
@@ -994,7 +995,10 @@ export function connectionIntentService(db: Db) {
         if (payload.accessRequest.connectionId !== connectionId) throw conflict("Use the connection named in this access request");
         throw forbidden("Granting agent tool access requires connection-management authority");
       }
-      await tx.select({ id: toolConnections.id }).from(toolConnections).where(and(eq(toolConnections.id, connectionId), eq(toolConnections.companyId, loaded.issue.companyId))).for("update");
+      await tx.select({ id: connectionGrants.id }).from(connectionGrants)
+        .where(and(eq(connectionGrants.connectionId, connectionId), eq(connectionGrants.companyId, loaded.issue.companyId)))
+        .orderBy(connectionGrants.id).for("update");
+      await lockToolConnectionRuntimeInputs(tx, loaded.issue.companyId, connectionId);
       let selectedConnection = await txAccess.getConnection(connectionId, loaded.issue.companyId);
       const selectedApplication = await txAccess.getApplication(
         selectedConnection.applicationId,
