@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, companies, companyMemberships, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
+import { agents, companies, companyMemberships, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, connectionGrantDelegations, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { pluginAgentRuntimeState } from "../services/plugin-agent-runtime-state.js";
@@ -85,6 +85,29 @@ describeDatabase("connector runtime synchronization", () => {
     const second = await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connectionId)).orderBy(toolCatalogEntries.toolName);
     expect(second.map(row => [row.id, row.firstSeenAt, row.status])).toEqual(first.map(row => [row.id, row.firstSeenAt, row.status]));
   });
+  it("refreshes known tools from overlapping MCP pages using the last descriptor", async () => {
+    await db.update(toolConnections).set({ config: { url: "https://mcp.example.test/mcp" } }).where(eq(toolConnections.id, connectionId));
+    let overlap = false;
+    const descriptor = (description: string) => ({ name: "search", description, inputSchema: { type: "object" }, annotations: { readOnlyHint: true } });
+    const service = toolAccessService(db, {
+      remoteHttpEndpointLookup: async () => [{ address: "8.8.8.8", family: 4 }],
+      remoteHttpRequest: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+        const result = body.method === "initialize" ? { protocolVersion: "2025-06-18" }
+          : body.params?.cursor ? { tools: [descriptor("Last page")] }
+          : { tools: [descriptor("First page")], ...(overlap ? { nextCursor: "overlap" } : {}) };
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { headers: { "content-type": "application/json" } });
+      },
+    });
+    await service.refreshCatalog(connectionId);
+    const [first] = await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connectionId));
+    overlap = true;
+    expect((await service.refreshCatalog(connectionId)).catalog).toHaveLength(1);
+    const rows = await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connectionId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: first.id, firstSeenAt: first.firstSeenAt, description: "Last page" });
+  });
   it("captures referenced vault configuration and disablement through the real provider service", async () => {
     const [vault] = await db.insert(companySecretProviderConfigs).values({ companyId, provider: "aws_secrets_manager", displayName: "Fixture vault", config: { region: "us-east-1" } }).returning();
     const [secret] = await db.insert(companySecrets).values({ companyId, provider: "aws_secrets_manager", providerConfigId: vault.id, key: "vault", name: "Vault fixture" }).returning();
@@ -115,6 +138,39 @@ describeDatabase("connector runtime synchronization", () => {
     await service.replaceConnectionGrantMembers(connectionId, grant.id, []);
     expect(await events()).toHaveLength(before + 4);
   });
+  it("serializes concurrent delegations before acquiring agent foreign-key locks", async () => {
+    await db.insert(companyMemberships).values(["alice", "bob"].map(principalId => ({ companyId, principalType: "user", principalId, status: "active" })));
+    const grants = await db.insert(connectionGrants).values(["alice", "bob"].map(subjectUserId => ({ companyId, connectionId, kind: "user", subjectUserId }))).returning();
+    const [lower, higher] = [agentId, peerId].sort();
+    let locked!: () => void; let release!: () => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const blocker = db.transaction(async tx => {
+      await tx.select().from(agents).where(eq(agents.id, lower)).for("no key update");
+      locked(); await resume;
+    });
+    await held;
+    const pids: number[] = [];
+    const saves = grants.map((grant, index) => db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      pids.push(Number(row.pid));
+      return toolAccessService(tx as unknown as Db).createConnectionGrantDelegation(connectionId, grant.id, index === 0 ? higher : lower, grant.subjectUserId!);
+    }));
+    const completed = Promise.allSettled(saves);
+    try {
+      await vi.waitFor(async () => {
+        expect(pids).toHaveLength(2);
+        const rows = await db.execute(sql`SELECT pid FROM pg_stat_activity WHERE pid IN (${pids[0]}, ${pids[1]}) AND wait_event_type = 'Lock'`);
+        expect(rows).toHaveLength(2);
+      }, { timeout: 5000 });
+    } finally { release(); await blocker; }
+    expect((await completed).map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(await db.select().from(connectionGrantDelegations).where(eq(connectionGrantDelegations.companyId, companyId))).toHaveLength(2);
+    const before = await events();
+    await toolAccessService(db).createConnectionGrantDelegation(connectionId, grants[0].id, higher, grants[0].subjectUserId!);
+    expect(await events()).toEqual(before);
+  }, 15000);
   it("invalidates only the owner of an agent secret binding", async () => {
     const [secret] = await db.insert(companySecrets).values({ companyId, key: "binding", name: "Binding fixture" }).returning();
     const before = (await events()).length;
