@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, companies, companyMemberships, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, connectionGrantDelegations, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
+import { agents, companies, companyMemberships, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, connectionGrantMembers, connectionGrantDelegations, userSecretDefinitions, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { pluginAgentRuntimeState } from "../services/plugin-agent-runtime-state.js";
@@ -241,6 +241,44 @@ describeDatabase("connector runtime synchronization", () => {
     expect((await db.select().from(companyMemberships).where(eq(companyMemberships.id, member.id)))[0].status).toBe(status);
     expect((await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)))[0].status).toBe("revoked");
     expect(await db.select().from(connectionGrantDelegations).where(eq(connectionGrantDelegations.grantId, grant.id))).toEqual([]);
+  }, 15000);
+  it("orders audience replacement after membership cleanup without reversing grant locks", async () => {
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "owner", membershipRole: "owner", status: "active" });
+    const members = await db.insert(companyMemberships).values(["alice", "bob"].map(principalId => ({ companyId, principalType: "user", principalId, membershipRole: "member", status: "active" }))).returning();
+    const member = members.find(row => row.principalId === "alice")!;
+    const [definition] = await db.insert(userSecretDefinitions).values({ companyId, key: "audience", name: "Audience fixture" }).returning();
+    const [secret] = await db.insert(companySecrets).values({ companyId, key: "audience", name: "Audience fixture", scope: "user", userSecretDefinitionId: definition.id, ownerUserId: "alice" }).returning();
+    await db.insert(connectionGrants).values({ companyId, connectionId, kind: "user", subjectUserId: "alice", credentialSecretRefs: [{ secretId: secret.id, configPath: "oauth.access_token" }] });
+    const [organization] = await db.insert(connectionGrants).values({ companyId, connectionId, kind: "organization", isDefault: true }).returning();
+    await db.insert(connectionGrantMembers).values({ companyId, grantId: organization.id, subjectType: "user", subjectId: "alice" });
+    let locked!: () => void; let resume!: () => void; let started!: (pid: number) => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const maySuspend = new Promise<void>(resolve => { resume = resolve; });
+    const audienceStarted = new Promise<number>(resolve => { started = resolve; });
+    const cleanup = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      await tx.select().from(companyMemberships).where(eq(companyMemberships.id, member.id)).for("update");
+      locked(); await maySuspend;
+      return accessService(tx as unknown as Db).updateMember(companyId, member.id, { status: "suspended" });
+    });
+    await held;
+    const replacement = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      started(Number(row.pid));
+      return toolAccessService(tx as unknown as Db).replaceConnectionGrantMembers(connectionId, organization.id, ["bob"]);
+    });
+    const completed = Promise.allSettled([cleanup, replacement]);
+    try {
+      const pid = await audienceStarted;
+      await vi.waitFor(async () => {
+        const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pid}`);
+        expect(row.wait_event_type).toBe("Lock");
+      }, { timeout: 5000 });
+    } finally { resume(); }
+    expect((await completed).map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect((await db.select().from(companyMemberships).where(eq(companyMemberships.id, member.id)))[0].status).toBe("suspended");
+    expect((await db.select().from(connectionGrantMembers).where(eq(connectionGrantMembers.grantId, organization.id))).map(row => row.subjectId)).toEqual(["bob"]);
   }, 15000);
   it("invalidates only the owner of an agent secret binding", async () => {
     const [secret] = await db.insert(companySecrets).values({ companyId, key: "binding", name: "Binding fixture" }).returning();

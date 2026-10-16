@@ -15592,7 +15592,8 @@ export function toolAccessService(
                 : eq(connectionGrants.isDefault, true),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("update");
       const existingRefs =
         existingCredentialGrant?.credentialSecretRefs ??
         (personalCredential || agentCredential
@@ -16192,7 +16193,7 @@ export function toolAccessService(
             ),
           )
           .limit(1)
-          .for("update");
+        .for("update");
         if (!membership) {
           throw forbidden(
             "Your company membership no longer permits connection changes. Ask a company owner to restore non-viewer access before you authorize this connection again.",
@@ -16212,7 +16213,8 @@ export function toolAccessService(
               eq(connectionGrants.subjectUserId, stateRow.subjectUserId!),
             ),
           )
-          .limit(1);
+          .limit(1)
+        .for("update");
         const subjectCredentialSecretRefs =
           existingUserGrant?.credentialSecretRefs ?? [];
         const accessRef = await createOrRotateOAuthSecret(
@@ -16526,6 +16528,10 @@ export function toolAccessService(
           "Only a company owner, admin, or member with connection-manager permission can share credentials with the organization.",
         );
       }
+      await tx.select({ id: connectionGrants.id }).from(connectionGrants)
+        .where(and(eq(connectionGrants.companyId, connection.companyId), eq(connectionGrants.connectionId, connection.id),
+          eq(connectionGrants.kind, "organization"), eq(connectionGrants.isDefault, true)))
+        .for("update");
       const txSecrets = secretService(tx);
       const txSecretContext = { dbClient: tx, secretClient: txSecrets };
 
@@ -18258,17 +18264,7 @@ export function toolAccessService(
         // Serialize replacements before taking the current audience snapshot.
         // Otherwise a second replacement could read the old rows, wait behind
         // an in-flight replacement, and then miss locking a newly-added member.
-        await tx
-          .select({ id: connectionGrants.id })
-          .from(connectionGrants)
-          .where(
-            and(
-              eq(connectionGrants.id, grant.id),
-              eq(connectionGrants.companyId, connection.companyId),
-              eq(connectionGrants.connectionId, connection.id),
-            ),
-          )
-          .for("update");
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${"paperclip.connection_grant_audience:" + grant.id}, 0))`);
         const existingAudience = await tx
           .select()
           .from(connectionGrantMembers)
@@ -18333,6 +18329,17 @@ export function toolAccessService(
             );
           }
         }
+        await tx
+          .select({ id: connectionGrants.id })
+          .from(connectionGrants)
+          .where(
+            and(
+              eq(connectionGrants.id, grant.id),
+              eq(connectionGrants.companyId, connection.companyId),
+              eq(connectionGrants.connectionId, connection.id),
+            ),
+          )
+          .for("update");
         const existingUserSet = new Set(existingUserIds);
         if (requested.length === existingUserSet.size && requested.every(id => existingUserSet.has(id))) return existingAudience;
         await tx
