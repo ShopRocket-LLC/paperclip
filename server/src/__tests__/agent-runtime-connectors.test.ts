@@ -88,6 +88,59 @@ describeDatabase("connector runtime synchronization", () => {
     const second = await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connectionId)).orderBy(toolCatalogEntries.toolName);
     expect(second.map(row => [row.id, row.firstSeenAt, row.status])).toEqual(first.map(row => [row.id, row.firstSeenAt, row.status]));
   });
+  it.each(["catalog refresh", "profile edit", "policy edit"] as const)("serializes %s with action finalization before runtime locks", async change => {
+    await db.update(toolConnections).set({ config: { url: "https://mcp.example.test/mcp" } }).where(eq(toolConnections.id, connectionId));
+    let description = "Initial search";
+    const options = {
+      remoteHttpEndpointLookup: async () => [{ address: "8.8.8.8", family: 4 as const }],
+      remoteHttpRequest: async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: body.method === "initialize" ? { protocolVersion: "2025-06-18" } : { tools: [{ name: "search", description, inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }] } }), { headers: { "content-type": "application/json" } });
+      },
+    };
+    await toolAccessService(db, options).refreshCatalog(connectionId);
+    const [entry] = await db.update(toolCatalogEntries).set({ status: "quarantined" }).where(eq(toolCatalogEntries.connectionId, connectionId)).returning();
+    const [profile] = await db.select().from(toolProfiles).where(and(eq(toolProfiles.companyId, companyId), eq(toolProfiles.profileKey, `app:${connectionId}`)));
+    const [policy] = change === "policy edit" ? await db.insert(toolPolicies).values({ companyId, name: "Managed search review", policyType: "require_approval", selectors: { catalogEntryId: entry.id }, config: { source: "app_gallery_finish", connectionId, catalogEntryId: entry.id } }).returning() : [];
+    if (change === "catalog refresh") description = "Changed search";
+    let locked!: () => void; let release!: () => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const blocker = db.transaction(async tx => {
+      await tx.select().from(agents).where(eq(agents.id, [agentId, peerId].sort()[0])).for("no key update");
+      locked(); await resume;
+    });
+    await held;
+    const pids: number[] = [];
+    const run = (work: (service: ReturnType<typeof toolAccessService>, policies: ReturnType<typeof toolAccessPolicyService>) => Promise<unknown>) => db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      pids.push(Number(row.pid));
+      return work(toolAccessService(tx as unknown as Db, options), toolAccessPolicyService(tx as unknown as Db));
+    });
+    const waitForLock = (index: number) => vi.waitFor(async () => {
+      expect(pids.length).toBeGreaterThan(index);
+      const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pids[index]}`);
+      expect(row.wait_event_type).toBe("Lock");
+    }, { timeout: 5000 });
+    const finish = run(writer => writer.finishGalleryAppConnection(companyId, connectionId, { enabledCatalogEntryIds: [entry.id], askFirstCatalogEntryIds: change === "policy edit" ? [entry.id] : [], reviewedCatalogEntryIds: [entry.id], access: "all_agents" }));
+    let refresh: Promise<unknown> | undefined;
+    try {
+      await waitForLock(0);
+      refresh = run((writer, policies) => change === "catalog refresh" ? writer.refreshCatalog(connectionId)
+        : change === "profile edit" ? writer.updateProfile(profile.id, { description: "Edited concurrently" })
+        : policies.updatePolicy({ companyId, policyId: policy!.id, body: { description: "Edited concurrently", config: null } }));
+      await waitForLock(1);
+    } finally { release(); await blocker; }
+    const results = await Promise.allSettled([finish, refresh]);
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    const [updated] = await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.id, entry.id));
+    expect(updated).toMatchObject({ status: "active", description });
+    if (change === "profile edit") expect((await db.select().from(toolProfiles).where(eq(toolProfiles.id, profile.id)))[0].description).toBe("Edited concurrently");
+    if (change === "policy edit") expect((await db.select().from(toolPolicies).where(eq(toolPolicies.id, policy!.id)))[0].description).toBe("Edited concurrently");
+  }, 15000);
   it("refreshes known tools from overlapping MCP pages using the last descriptor", async () => {
     await db.update(toolConnections).set({ config: { url: "https://mcp.example.test/mcp" } }).where(eq(toolConnections.id, connectionId));
     let overlap = false;

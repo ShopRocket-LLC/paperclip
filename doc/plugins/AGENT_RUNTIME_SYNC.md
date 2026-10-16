@@ -113,7 +113,11 @@ covered if a mutation changes ownership. Statement-level transition tables batch
 bulk catalog changes: each company gets one fanout per transaction, regardless
 of the number of changed tools. The real catalog publisher writes chunks of
 500 tools, preserving IDs, first-seen timestamps, and review choices while
-staying within SQL parameter limits. Empty statements, unchanged rediscovery,
+staying within SQL parameter limits. Each catalog publication and default-profile
+sync locks its connection before catalog/profile rows and runtime journal locks,
+matching action finalization while preserving per-chunk commits. Existing managed
+profiles and policies are locked before binding changes can lock agent runtimes.
+Empty statements, unchanged rediscovery,
 health results, and use/publication timestamps do not create work. Failure to
 record work rolls back the connector mutation.
 Unchanged grant audiences retain their existing rows after membership validation.

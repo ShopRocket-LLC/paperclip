@@ -8632,15 +8632,17 @@ describeEmbeddedPostgres("tool access service", () => {
         "state",
       )!;
       const originalTransaction = db.transaction.bind(db);
-      let transactionCount = 0;
       const transactionSpy = vi
         .spyOn(db, "transaction")
-        .mockImplementation((async (operation, config) => {
-          transactionCount += 1;
-          if (transactionCount === 2)
-            throw new Error("recommended defaults failed");
-          return originalTransaction(operation, config);
-        }) as typeof db.transaction);
+        .mockImplementation((async (operation, config) => originalTransaction(async tx => {
+          const insert = tx.insert.bind(tx);
+          const insertSpy = vi.spyOn(tx, "insert").mockImplementation(((table: Parameters<typeof tx.insert>[0]) => {
+            if (table === toolProfiles) throw new Error("recommended defaults failed");
+            return insert(table);
+          }) as typeof tx.insert);
+          try { return await operation(tx); }
+          finally { insertSpy.mockRestore(); }
+        }, config)) as typeof db.transaction);
 
       await expect(
         service.completePaperclipCloudConnectorCallback({
