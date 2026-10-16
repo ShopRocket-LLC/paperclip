@@ -10284,7 +10284,7 @@ describeEmbeddedPostgres("tool access service", () => {
     } else expect((await service.getConnection(connected.connectionId, company.id)).name).toBe("Settings saved concurrently");
   }, 15000);
 
-  it("orders app finishing with OAuth reconnect before either locks the connection", async () => {
+  it.each(["app finishing", "new tool discovery"] as const)("orders %s with OAuth reconnect before either locks the connection", async change => {
     vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
     vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_SECRET", "slack-client-secret");
     const company = await createCompany(db);
@@ -10295,16 +10295,18 @@ describeEmbeddedPostgres("tool access service", () => {
     const connected = await service.connectGalleryApp(company.id, { galleryKey: "slack", name: "Concurrent sharing", grantKind: "user" }, actor);
     const connection = await service.getConnection(connected.connectionId, company.id);
     const redirectUri = "https://paperclip.example/api/tools/oauth/callback";
+    let discoverNewTool = false;
     vi.spyOn(globalThis, "fetch").mockImplementation(async url => {
       const href = String(url);
       if (href === "https://slack.com/api/oauth.v2.access") return mcpHttpResponse(oauthToken("fixture-access-token", "fixture-refresh-token"));
-      if (href === "https://mcp.slack.com/mcp") return mcpHttpResponse(catalogResponse([{ name: "search_messages", annotations: { readOnlyHint: true } }]));
+      if (href === "https://mcp.slack.com/mcp") return mcpHttpResponse(catalogResponse([{ name: "search_messages", annotations: { readOnlyHint: true } }, ...(discoverNewTool ? [{ name: "new_search", annotations: { readOnlyHint: true } }] : [])]));
       throw new Error(`unexpected fetch ${href}`);
     });
     const start = () => service.startOAuth(company.id, connected.connectionId, { redirectUri, actor, subjectUserId: userId });
     const initial = await start();
     await service.completeOAuthCallback({ state: new URL(initial.authorizationUrl).searchParams.get("state")!, code: "initial", redirectUri, actor });
     const reconnect = await start();
+    discoverNewTool = change === "new tool discovery";
     let locked!: () => void; let release!: () => void;
     const held = new Promise<void>(resolve => { locked = resolve; });
     const resume = new Promise<void>(resolve => { release = resolve; });
@@ -10314,12 +10316,14 @@ describeEmbeddedPostgres("tool access service", () => {
     });
     await held;
     const pids: number[] = [];
-    const run = (work: (service: ReturnType<typeof createTestToolAccessService>) => Promise<unknown>) => db.transaction(async tx => {
+    const transaction = db.transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, "transaction").mockImplementation((async (operation, config) => transaction(async tx => {
       await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
       const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
       pids.push(Number(row.pid));
-      return work(createTestToolAccessService(tx as unknown as Db));
-    });
+      return operation(tx);
+    }, config)) as typeof db.transaction);
+    const run = (work: (service: ReturnType<typeof createTestToolAccessService>) => Promise<unknown>) => work(createTestToolAccessService(db));
     const waitForLock = (index: number) => vi.waitFor(async () => {
       expect(pids.length).toBeGreaterThan(index);
       const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pids[index]}`);
@@ -10329,14 +10333,16 @@ describeEmbeddedPostgres("tool access service", () => {
     let finishing: Promise<unknown> | undefined;
     try {
       await waitForLock(0);
-      finishing = run(writer => writer.finishGalleryAppConnection(company.id, connected.connectionId, { enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: "all_agents" }, actor));
+      finishing = run(writer => change === "new tool discovery" ? writer.refreshCatalog(connected.connectionId) : writer.finishGalleryAppConnection(company.id, connected.connectionId, { enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: "all_agents" }, actor));
       await waitForLock(1);
     } finally { release(); await blocker; }
     const results = await Promise.allSettled([callback, finishing]);
     for (const result of results) if (result.status === "rejected") throw result.reason;
+    transactionSpy.mockRestore();
     expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
     expect(await service.getConnection(connected.connectionId, company.id)).toMatchObject({ credentialPolicy: "per_user", status: "active" });
-    expect(await db.select().from(toolProfiles).where(and(eq(toolProfiles.companyId, company.id), eq(toolProfiles.profileKey, `app:${connected.connectionId}`)))).toHaveLength(1);
+    if (change === "new tool discovery") expect(await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connected.connectionId))).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: "new_search" })]));
+    else expect(await db.select().from(toolProfiles).where(and(eq(toolProfiles.companyId, company.id), eq(toolProfiles.profileKey, `app:${connected.connectionId}`)))).toHaveLength(1);
   }, 15000);
 
   it("promotes a personal OAuth identity only after Everyone in the company is chosen", async () => {

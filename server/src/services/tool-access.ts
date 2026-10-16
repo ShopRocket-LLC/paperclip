@@ -7768,6 +7768,9 @@ export function toolAccessService(
     }
 
     const publish = <T>(write: (client: ToolAccessMutationDb) => Promise<T>): Promise<T> => db.transaction(async tx => {
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+        .for("update");
       await tx.select({ id: toolConnections.id }).from(toolConnections)
         .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
         .for("update");
