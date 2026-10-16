@@ -1,0 +1,90 @@
+# Fork-only workflow: deploys master to the internal host "release-bot" via a
+# self-hosted runner installed on that host. See docs/deploy-release-bot.md.
+#
+# SECURITY: this repo is public and the runner lives on a shared internal host.
+# Never add pull_request / pull_request_target / issue_* / workflow_run triggers
+# to this workflow. Only pushes to master and manual dispatch may run it.
+name: Deploy to release-bot
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize deploys; a newer push waits for the running deploy instead of
+# cancelling a half-finished build/recreate.
+concurrency:
+  group: deploy-release-bot
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy (release-bot)
+    if: github.repository == 'ShopRocket-LLC/paperclip'
+    runs-on: [self-hosted, release-bot]
+    timeout-minutes: 60
+    env:
+      APP_DIR: /home/dcsupport/apps/paperclip
+      CONTAINER: docker-paperclip-1
+    steps:
+      - name: Update host clone to origin/master
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          PREV_SHA="$(git rev-parse HEAD)"
+          echo "$PREV_SHA" > "$RUNNER_TEMP/prev_sha"
+          echo "Previous deployed commit: $PREV_SHA"
+          # No `git clean` and no `rm`: untracked/ignored files (docker/.env,
+          # data/) are never touched.
+          git fetch origin master
+          git checkout master
+          git reset --hard origin/master
+          echo "Deploying commit: $(git rev-parse HEAD)"
+          git log -1 --format='%h %s'
+
+      - name: Build and (re)create container
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR/docker"
+          # docker/.env is read automatically by compose; never print config.
+          docker compose -f docker-compose.quickstart.yml up --build -d
+
+      - name: Health check
+        run: |
+          set -uo pipefail
+          deadline=$((SECONDS + 300))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)"
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:3100/ || true)"
+            echo "container=$state http=$code"
+            if [ "$state" = "running" ] && [ "$code" = "200" ]; then
+              echo "Healthy."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Health check failed after 5 minutes"
+          docker ps -a --filter "name=$CONTAINER"
+          docker logs --tail 50 "$CONTAINER" 2>&1 || true
+          echo "Previous commit was: $(cat "$RUNNER_TEMP/prev_sha")"
+          echo "Manual rollback (on release-bot):"
+          echo "  git -C ~/apps/paperclip reset --hard $(cat "$RUNNER_TEMP/prev_sha") && cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml up --build -d"
+          exit 1
+
+      - name: Record deployed version and prune
+        if: success()
+        run: |
+          set -euo pipefail
+          echo "Deployed commit: $(git -C "$APP_DIR" rev-parse HEAD)"
+          echo "Container image id: $(docker inspect -f '{{.Image}}' "$CONTAINER")"
+          echo "Container started: $(docker inspect -f '{{.State.StartedAt}}' "$CONTAINER")"
+          # Dangling images only: no -a, no volumes.
+          docker image prune -f
+          {
+            echo "### Deployed to release-bot"
+            echo "- Commit: \`$(git -C "$APP_DIR" rev-parse HEAD)\`"
+            echo "- Previous: \`$(cat "$RUNNER_TEMP/prev_sha")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
