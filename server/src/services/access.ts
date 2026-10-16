@@ -237,6 +237,11 @@ export function accessService(db: Db) {
         .where(and(eq(connectionGrants.companyId, companyId), inArray(connectionGrants.id, affectedGrantIds)))
         .orderBy(connectionGrants.id).for("update");
     }
+    if (affectedConnectionIds.length > 0) {
+      await tx.select({ id: toolConnections.id }).from(toolConnections)
+        .where(and(eq(toolConnections.companyId, companyId), inArray(toolConnections.id, affectedConnectionIds)))
+        .orderBy(toolConnections.id).for("update");
+    }
     const removedDelegations = grantIds.length === 0 ? [] : await tx
       .delete(connectionGrantDelegations)
       .where(and(

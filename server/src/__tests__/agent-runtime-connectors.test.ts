@@ -206,10 +206,13 @@ describeDatabase("connector runtime synchronization", () => {
     expect(await db.select().from(connectionGrantDelegations).where(eq(connectionGrantDelegations.grantId, grant.id))).toEqual([]);
     await expect(toolAccessService(db).createConnectionGrantDelegation(connectionId, grant.id, peerId, "alice")).rejects.toThrow("Only the active personal grant owner");
   }, 15000);
-  it.each(["suspended", "archived"] as const)("orders membership %s cleanup with concurrent grant revocation", async status => {
+  it.each((["suspended", "archived"] as const).flatMap(status => (["revocation", "settings"] as const).map(writer => ({ status, writer }))))("orders membership $status cleanup with concurrent $writer", async ({ status, writer }) => {
+    await db.update(toolConnections).set({ config: { url: "https://mcp.example.test/mcp" } }).where(eq(toolConnections.id, connectionId));
     await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "owner", membershipRole: "owner", status: "active" });
     const [member] = await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "alice", membershipRole: "member", status: "active" }).returning();
-    const [grant] = await db.insert(connectionGrants).values({ companyId, connectionId, kind: "user", subjectUserId: "alice" }).returning();
+    const [definition] = await db.insert(userSecretDefinitions).values({ companyId, key: "cleanup", name: "Cleanup fixture" }).returning();
+    const [secret] = await db.insert(companySecrets).values({ companyId, key: "cleanup", name: "Cleanup fixture", scope: "user", ownerUserId: "alice", userSecretDefinitionId: definition.id }).returning();
+    const [grant] = await db.insert(connectionGrants).values({ companyId, connectionId, kind: "user", subjectUserId: "alice", credentialSecretRefs: [{ secretId: secret.id, configPath: "oauth.access_token" }] }).returning();
     await toolAccessService(db).createConnectionGrantDelegation(connectionId, grant.id, agentId, "alice");
     let locked!: () => void; let resume!: () => void; let started!: (pid: number) => void;
     const held = new Promise<void>(resolve => { locked = resolve; });
@@ -217,9 +220,11 @@ describeDatabase("connector runtime synchronization", () => {
     const cleanupStarted = new Promise<number>(resolve => { started = resolve; });
     const revocation = db.transaction(async tx => {
       await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
-      await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+      if (writer === "revocation") await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+      else await tx.select().from(toolConnections).where(eq(toolConnections.id, connectionId)).for("update");
       locked(); await mayRevoke;
-      return toolAccessService(tx as unknown as Db).revokeConnectionGrant(connectionId, grant.id);
+      const service = toolAccessService(tx as unknown as Db, { remoteHttpEndpointLookup: async () => [{ address: "8.8.8.8", family: 4 }] });
+      return writer === "revocation" ? service.revokeConnectionGrant(connectionId, grant.id) : service.updateConnection(connectionId, { name: "Concurrent settings" });
     });
     await held;
     const cleanup = db.transaction(async tx => {
@@ -241,6 +246,8 @@ describeDatabase("connector runtime synchronization", () => {
     expect((await db.select().from(companyMemberships).where(eq(companyMemberships.id, member.id)))[0].status).toBe(status);
     expect((await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)))[0].status).toBe("revoked");
     expect(await db.select().from(connectionGrantDelegations).where(eq(connectionGrantDelegations.grantId, grant.id))).toEqual([]);
+    expect(await db.select().from(companySecrets).where(eq(companySecrets.id, secret.id))).toEqual([]);
+    if (writer === "settings") expect((await db.select().from(toolConnections).where(eq(toolConnections.id, connectionId)))[0].name).toBe("Concurrent settings");
   }, 15000);
   it("orders audience replacement after membership cleanup without reversing grant locks", async () => {
     await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "owner", membershipRole: "owner", status: "active" });

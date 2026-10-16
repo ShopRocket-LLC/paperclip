@@ -10216,7 +10216,7 @@ describeEmbeddedPostgres("tool access service", () => {
     },
   );
 
-  it("orders personal OAuth reconnect credential rotation with concurrent sharing", async () => {
+  it.each(["sharing", "settings"] as const)("orders personal OAuth reconnect credential rotation with concurrent %s", async change => {
     vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
     vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_SECRET", "slack-client-secret");
     const company = await createCompany(db);
@@ -10244,9 +10244,13 @@ describeEmbeddedPostgres("tool access service", () => {
     const reconnectStarted = new Promise<number>(resolve => { started = resolve; });
     const sharing = db.transaction(async tx => {
       await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
-      await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+      if (change === "sharing") await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+      else await tx.select().from(toolConnections).where(eq(toolConnections.id, connected.connectionId)).for("update");
       locked(); await mayShare;
-      return createTestToolAccessService(tx as unknown as Db).finalizeOAuthAccess(company.id, connected.connectionId, { grantKind: "organization" }, actor);
+      const writer = createTestToolAccessService(tx as unknown as Db);
+      return change === "sharing"
+        ? writer.finalizeOAuthAccess(company.id, connected.connectionId, { grantKind: "organization" }, actor)
+        : writer.updateConnection(connected.connectionId, { name: "Settings saved concurrently" });
     });
     await held;
     const callback = db.transaction(async tx => {
@@ -10267,7 +10271,8 @@ describeEmbeddedPostgres("tool access service", () => {
     for (const result of results) if (result.status === "rejected") throw result.reason;
     expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
     expect(await service.getConnection(connected.connectionId, company.id)).toMatchObject({ credentialPolicy: "per_user", status: "active" });
-    expect((await service.listConnectionGrants(connected.connectionId, company.id)).grants).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "organization", status: "active" })]));
+    if (change === "sharing") expect((await service.listConnectionGrants(connected.connectionId, company.id)).grants).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "organization", status: "active" })]));
+    else expect((await service.getConnection(connected.connectionId, company.id)).name).toBe("Settings saved concurrently");
   }, 15000);
 
   it("promotes a personal OAuth identity only after Everyone in the company is chosen", async () => {

@@ -121,6 +121,9 @@ User-scoped audiences can affect task-time access for any company agent, so chan
 audiences conservatively refresh the company once. Agent secret bindings instead
 invalidate only their owning agent, avoiding lock inversion with configuration
 saves that already hold that agent's row lock.
+OAuth persistence and membership cleanup lock affected connections before
+credential/access mutations can lock agent runtimes. Existing grants are locked
+before connections; cleanup locks each affected set in ID order.
 
 Managed feature overlays can change between server starts without a database
 write. Each delivery service therefore journals one baseline refresh per company
