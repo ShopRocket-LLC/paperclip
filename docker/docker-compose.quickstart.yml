@@ -20,6 +20,7 @@ services:
     pids_limit: 2048
     # Includes the shared 30s adapter-settlement window and final cleanup.
     stop_grace_period: 90s
+    restart: unless-stopped
     ports:
       - "${PAPERCLIP_PORT:-3100}:3100"
     environment:
@@ -30,6 +31,10 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:-}"
+
+      # Disable anonymous usage telemetry (telemetry.paperclip.ing)
+      DO_NOT_TRACK: "1"
+      PAPERCLIP_TELEMETRY_DISABLED: "1"
 
       # ── Deployment settings ──
       # "authenticated" requires login, "local_trusted" skips auth
