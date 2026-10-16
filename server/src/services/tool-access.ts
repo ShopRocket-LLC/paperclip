@@ -18877,6 +18877,15 @@ export function toolAccessService(
         profileId: string;
       }> = [];
       await db.transaction(async (tx) => {
+        await tx.select({ id: toolApplications.id }).from(toolApplications)
+          .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+          .for("update");
+        await tx.select({ id: toolConnections.id }).from(toolConnections)
+          .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
+          .for("update");
+        await tx.select({ id: toolProfiles.id }).from(toolProfiles)
+          .where(and(eq(toolProfiles.companyId, connection.companyId), eq(toolProfiles.profileKey, `app:${connection.id}`)))
+          .for("no key update");
         if (markMcpAccessConfigured) {
           // Preserve an explicit zero-agent selection through OAuth. Merge the
           // marker in SQL so concurrent credential/config changes are retained.

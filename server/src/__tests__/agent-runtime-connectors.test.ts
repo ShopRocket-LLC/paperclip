@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, companies, companyMemberships, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, connectionGrantMembers, connectionGrantDelegations, userSecretDefinitions, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolPolicies, toolMcpGateways, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
+import { agents, companies, companyMemberships, principalPermissionGrants, companySecrets, companySecretBindings, companySecretProviderConfigs, connectionGrants, connectionGrantMembers, connectionGrantDelegations, userSecretDefinitions, createDb, instanceSettings, pluginConfig, plugins, toolApplications, toolConnections, toolCatalogEntries, toolConnectionInstalls, toolProfiles, toolPolicies, toolMcpGateways, toolProfileBindings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { pluginAgentRuntimeState } from "../services/plugin-agent-runtime-state.js";
@@ -264,6 +264,61 @@ describeDatabase("connector runtime synchronization", () => {
     const [application] = await db.select().from(toolApplications).where(eq(toolApplications.id, applicationId));
     expect(application.name).toBe("Edited concurrently");
     expect((await toolAccessService(db).getConnection(connectionId, companyId)).status).toBe(change === "archive" ? "archived" : "active");
+  }, 15000);
+  it.each(["uninstall", "permission save"] as const)("serializes %s with finalization or role changes before runtime locks", async change => {
+    let first: (client: Db) => Promise<unknown>;
+    let second: (client: Db) => Promise<unknown>;
+    let memberId: string | undefined;
+    if (change === "uninstall") {
+      await toolAccessService(db).putConnectionInstalls(connectionId, { installs: [{ targetType: "agent", targetId: agentId }] });
+      expect((await toolAccessService(db).getConnection(connectionId, companyId)).config.mcpAgentAccessConfigured).toBe(true);
+      first = client => toolAccessService(client).putConnectionInstalls(connectionId, { installs: [] });
+      second = client => toolAccessService(client).finishGalleryAppConnection(companyId, connectionId, { enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: "all_agents" });
+    } else {
+      const [member] = await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "alice", status: "active", membershipRole: "member" }).returning();
+      memberId = member.id;
+      await db.insert(principalPermissionGrants).values({ companyId, principalType: "user", principalId: "alice", permissionKey: "agents:create" });
+      first = client => accessService(client).updateMemberAndPermissions(companyId, member.id, { membershipRole: "admin", grants: [{ permissionKey: "agents:create" }] }, null);
+      second = client => accessService(client).setMemberPermissions(companyId, member.id, [{ permissionKey: "issues:create" }], null);
+    }
+    let locked!: () => void; let release!: () => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const blocker = db.transaction(async tx => {
+      await tx.select().from(agents).where(eq(agents.id, [agentId, peerId].sort()[0])).for("no key update");
+      locked(); await resume;
+    });
+    await held;
+    const pids: number[] = [];
+    const run = (work: (client: Db) => Promise<unknown>) => db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      pids.push(Number(row.pid));
+      return work(tx as unknown as Db);
+    });
+    const waitForLock = (index: number) => vi.waitFor(async () => {
+      expect(pids.length).toBeGreaterThan(index);
+      const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pids[index]}`);
+      expect(row.wait_event_type).toBe("Lock");
+    }, { timeout: 5000 });
+    const initial = run(first);
+    let concurrent: Promise<unknown> | undefined;
+    try {
+      await waitForLock(0);
+      concurrent = run(second);
+      await waitForLock(1);
+    } finally { release(); await blocker; }
+    const results = await Promise.allSettled([initial, concurrent]);
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    if (change === "uninstall") {
+      expect(await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connectionId))).toHaveLength(0);
+      const bindings = await db.select().from(toolProfileBindings).where(eq(toolProfileBindings.companyId, companyId));
+      expect(bindings.some(binding => binding.metadata?.source === "tool_connection_install")).toBe(false);
+    } else {
+      expect(await accessService(db).getMemberById(companyId, memberId!)).toMatchObject({ membershipRole: "admin" });
+      expect(await db.select().from(principalPermissionGrants).where(eq(principalPermissionGrants.companyId, companyId))).toEqual([expect.objectContaining({ permissionKey: "issues:create" })]);
+    }
   }, 15000);
   it("ignores real trust-rule hits while retaining meaningful rule changes", async () => {
     const [entry] = await db.insert(toolCatalogEntries).values({ companyId, applicationId, connectionId, name: "Search", toolName: "search", versionHash: "fixture" }).returning();

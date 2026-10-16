@@ -461,10 +461,11 @@ export function accessService(db: Db) {
     grants: GrantInput[],
     grantedByUserId: string | null,
   ) {
-    const member = await getMemberById(companyId, memberId);
-    if (!member) return null;
-
-    await db.transaction(async (tx) => {
+    return db.transaction(async (tx) => {
+      const member = await tx.select().from(companyMemberships)
+        .where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.id, memberId)))
+        .for("update").then(rows => rows[0] ?? null);
+      if (!member) return null;
       await tx
         .delete(principalPermissionGrants)
         .where(
@@ -488,9 +489,8 @@ export function accessService(db: Db) {
           })),
         );
       }
+      return member;
     });
-
-    return member;
   }
 
   async function updateMemberAndPermissions(
