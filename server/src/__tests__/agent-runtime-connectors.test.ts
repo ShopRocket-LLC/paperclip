@@ -171,6 +171,40 @@ describeDatabase("connector runtime synchronization", () => {
     await toolAccessService(db).createConnectionGrantDelegation(connectionId, grants[0].id, higher, grants[0].subjectUserId!);
     expect(await events()).toEqual(before);
   }, 15000);
+  it("orders grant revocation with a concurrent delegation creation", async () => {
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "alice", status: "active" });
+    const [grant] = await db.insert(connectionGrants).values({ companyId, connectionId, kind: "user", subjectUserId: "alice" }).returning();
+    await toolAccessService(db).createConnectionGrantDelegation(connectionId, grant.id, agentId, "alice");
+    let locked!: () => void; let resume!: () => void; let started!: (pid: number) => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const mayCreate = new Promise<void>(resolve => { resume = resolve; });
+    const revokerStarted = new Promise<number>(resolve => { started = resolve; });
+    const creation = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+      locked(); await mayCreate;
+      return toolAccessService(tx as unknown as Db).createConnectionGrantDelegation(connectionId, grant.id, peerId, "alice");
+    });
+    await held;
+    const revocation = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      started(Number(row.pid));
+      return toolAccessService(tx as unknown as Db).revokeConnectionGrant(connectionId, grant.id);
+    });
+    const completed = Promise.allSettled([creation, revocation]);
+    try {
+      const pid = await revokerStarted;
+      await vi.waitFor(async () => {
+        const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pid}`);
+        expect(row.wait_event_type).toBe("Lock");
+      }, { timeout: 5000 });
+    } finally { resume(); }
+    expect((await completed).map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect((await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)))[0].status).toBe("revoked");
+    expect(await db.select().from(connectionGrantDelegations).where(eq(connectionGrantDelegations.grantId, grant.id))).toEqual([]);
+    await expect(toolAccessService(db).createConnectionGrantDelegation(connectionId, grant.id, peerId, "alice")).rejects.toThrow("Only the active personal grant owner");
+  }, 15000);
   it("invalidates only the owner of an agent secret binding", async () => {
     const [secret] = await db.insert(companySecrets).values({ companyId, key: "binding", name: "Binding fixture" }).returning();
     const before = (await events()).length;

@@ -18621,6 +18621,10 @@ export function toolAccessService(
         providerRevocation = "local_only_shared_client";
       }
       const grant = await db.transaction(async (tx) => {
+        const [lockedGrant] = await tx.select({ id: connectionGrants.id }).from(connectionGrants)
+          .where(and(eq(connectionGrants.id, grantId), eq(connectionGrants.companyId, connection.companyId), eq(connectionGrants.connectionId, connection.id)))
+          .for("update");
+        if (!lockedGrant) throw notFound("Connection grant not found");
         const removedDelegations = await tx
           .delete(connectionGrantDelegations)
           .where(
