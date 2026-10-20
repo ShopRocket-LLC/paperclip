@@ -14,6 +14,6 @@ permissions:
 jobs:
   ci:
     if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci'
-    # Master requires CODEOWNERS review for .github/**, including this workflow.
-    # The AWS runner group permits pr-trusted.yml@refs/heads/master.
-    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@master
+    # ShopRocket fork: call the fork's own protected master, not
+    # upstream's, whose newer checks test files this fork does not have yet.
+    uses: ShopRocket-LLC/paperclip/.github/workflows/pr-trusted.yml@master

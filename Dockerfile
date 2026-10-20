@@ -181,6 +181,31 @@ RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && mkdir -p /paperclip \
   && chown node:node /paperclip
 
+# Opt-in agent tools (docker/docker-compose.agent-tools.yml sets this to 1):
+# the Docker CLI with the compose and buildx plugins, talking to a dind
+# sidecar, the .NET 8 SDK, and the system libraries Playwright's Chromium
+# needs (browsers install per repo with `npx playwright install chromium`,
+# cached under $HOME/.cache/ms-playwright). The default build skips it, so upstream images
+# are unchanged. GID 2375 is the group the sidecar's dockerd gives its socket.
+ARG INSTALL_AGENT_TOOLS=""
+RUN if [ "$INSTALL_AGENT_TOOLS" = "1" ]; then \
+    set -eux; \
+    install -m 0755 -d /etc/apt/keyrings; \
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin docker-buildx-plugin libicu76; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd -g 2375 docker; \
+    usermod -aG docker node; \
+    curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh; \
+    bash /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet --no-path; \
+    rm /tmp/dotnet-install.sh; \
+    ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet; \
+    npx -y playwright@1.62.1 install-deps chromium; \
+    rm -rf /var/lib/apt/lists/* /root/.npm; \
+  fi
+
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

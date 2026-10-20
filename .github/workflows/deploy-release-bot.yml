@@ -50,7 +50,8 @@ jobs:
           set -euo pipefail
           cd "$APP_DIR/docker"
           # docker/.env is read automatically by compose; never print config.
-          docker compose -f docker-compose.quickstart.yml up --build -d
+          # agent-tools overlay: dind sidecar + .NET SDK for agents.
+          docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d
 
       - name: Health check
         run: |
@@ -69,9 +70,17 @@ jobs:
           echo "::error::Health check failed after 5 minutes"
           docker ps -a --filter "name=$CONTAINER"
           docker logs --tail 50 "$CONTAINER" 2>&1 || true
-          echo "Previous commit was: $(cat "$RUNNER_TEMP/prev_sha")"
+          prev_sha="$(cat "$RUNNER_TEMP/prev_sha")"
+          echo "Previous commit was: $prev_sha"
+          # A commit from before the agent-tools overlay has no overlay file;
+          # roll back to quickstart only and drop the orphaned dind service.
+          if git -C "$APP_DIR" cat-file -e "$prev_sha:docker/docker-compose.agent-tools.yml" 2>/dev/null; then
+            compose_cmd="docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d"
+          else
+            compose_cmd="docker compose -f docker-compose.quickstart.yml up --build -d --remove-orphans"
+          fi
           echo "Manual rollback (on release-bot):"
-          echo "  git -C ~/apps/paperclip reset --hard $(cat "$RUNNER_TEMP/prev_sha") && cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml up --build -d"
+          echo "  git -C ~/apps/paperclip reset --hard $prev_sha && cd ~/apps/paperclip/docker && $compose_cmd"
           exit 1
 
       - name: Record deployed version and prune

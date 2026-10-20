@@ -11,7 +11,8 @@ Note: every upstream merge pushed to `master` triggers a deploy.
 
 1. In `~/apps/paperclip` on the host: `git fetch origin master`, `git checkout master`,
    `git reset --hard origin/master` (no `git clean`, so untracked/ignored files survive).
-2. `cd docker && docker compose -f docker-compose.quickstart.yml up --build -d`.
+2. `cd docker && docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d`
+   (see "Agent tools" below).
 3. Polls `http://localhost:3100/` for HTTP 200 and container `docker-paperclip-1`
    running, up to 5 minutes. On failure it prints `docker logs --tail 50`, the
    previous SHA and the rollback command.
@@ -43,6 +44,68 @@ by `github.repository == 'ShopRocket-LLC/paperclip'`. Never add `pull_request`,
 `runs-on: self-hosted` in any other workflow. Anyone who can push to `master` can
 run code on the host; keep `master` protected (PR required) and restrict write access.
 
+## Agent tools: Docker and .NET for agents
+
+`docker/docker-compose.agent-tools.yml` is layered on the quickstart file. It
+gives agents a Docker daemon and the .NET 8 SDK, so they can run okto-env /
+okto-stack test environments and build the C# parts of oktorocket. Without the
+overlay (upstream users), the image and stack are unchanged.
+
+- **`dind` service** (`docker:29-dind`, `privileged`). Its daemon listens only on
+  a unix socket in the `dind-socket` volume (no TCP listener). Images, containers
+  and volumes that agents create live in the `docker_dind-data` volume.
+- **Paperclip image** is built with `INSTALL_AGENT_TOOLS=1`: Docker CLI with the
+  compose v2 and buildx plugins (Docker's Debian repo), and the .NET 8 SDK
+  (`dotnet-install.sh --channel 8.0`; every oktorocket project targets `net8.0`).
+  `node` is in group `docker` (GID 2375), which owns the dind socket.
+  `DOCKER_HOST=unix:///var/run/dind/docker.sock`. It also has the system
+  libraries for Playwright's headless Chromium (`playwright install-deps`).
+  Browsers are not baked in: each repo runs `npx playwright install chromium`,
+  which caches the build matching its own Playwright version under
+  `/paperclip/.cache/ms-playwright` (persistent, shared across worktrees).
+- **Shared network namespace.** Paperclip runs with `network_mode: service:dind`,
+  so ports that test stacks publish on `127.0.0.1` in dind are reachable from
+  agents on `127.0.0.1`: okto-env health checks and Playwright tests use
+  `http://localhost:<port>`, with no `dind` hostname needed. Paperclip's port 3100 is therefore published on the
+  `dind` service. Nested networks use `10.231.0.0/16` so they never shadow LAN
+  routes. Avoid publishing port 3100 from a test stack.
+- **okto-env.** Keep `OKTO_ENV_HOME` under `/paperclip` (the default `~/.okto`
+  is), because its worktrees must be bind-mountable by dind.
+- **Bind mounts.** The data directory is mounted at `/paperclip` in both services,
+  so a compose file in an agent worktree (under `/paperclip/...`) can bind-mount
+  its sources. Paths outside `/paperclip` (for example `/tmp`) do not exist in
+  dind and come up as empty directories. Files that nested containers write as
+  root into a bind mount are root-owned, and `node` cannot delete them directly.
+  Remove them through dind (`docker run --rm -v "$PWD":/w alpine rm -rf /w/<dir>`).
+- **Resource limits** on `dind` (they cover every nested container): 12 CPUs,
+  20 GiB memory (no extra swap), 8192 pids. The host has 24 cores and 45 GiB;
+  okto-ops uses under 1 GiB and Paperclip about 2 GiB, so a runaway test stack
+  cannot starve okto-ops. Disk is not capped: check `docker system df` inside
+  dind and prune when needed (`docker exec -u node docker-paperclip-1 docker system prune -f`).
+- **Deploys.** A deploy recreates only `paperclip` when its image changes; `dind`
+  and running test stacks survive. A change to the `dind` service recreates both,
+  which stops test stacks (they restart if their restart policy says so).
+
+### Security model
+
+Agents have root over the dind daemon, not the host:
+
+- The host socket `/var/run/docker.sock` is never mounted. Agents cannot list,
+  stop or exec into `docker-paperclip-1`, the okto-ops containers, or anything
+  else on the host daemon.
+- `dind` is `privileged`, which dind requires. A container escape from a nested
+  container, or an agent starting a nested container with `--privileged` and
+  host devices, reaches the dind container, which is privileged on the host. So
+  this is a strong boundary against mistakes and runaway stacks, not a boundary
+  against a malicious agent with kernel exploits. The full boundary design is
+  okto-ops WP6 (rootless runtime, separate user, explicit egress rules).
+- Through dind, agents can read and write everything under `/paperclip` (they
+  already can as `node`), including root-owned writes.
+- Nested containers on a non-internal network have outbound network access
+  through the host, like Paperclip itself, and can reach Paperclip's port 3100
+  through the dind gateway. okto-env's synthetic stacks use an `internal: true`
+  network, which has no route out.
+
 ## Rollback
 
 On a failed health check the job log shows the previous SHA. To roll back manually:
@@ -50,8 +113,12 @@ On a failed health check the job log shows the previous SHA. To roll back manual
 ```bash
 ssh release-bot
 git -C ~/apps/paperclip reset --hard <PREVIOUS_SHA>
-cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml up --build -d
+cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d
 ```
+
+To roll back to a commit from before the agent-tools overlay existed, drop the
+second `-f` and add `--remove-orphans` so the `dind` service is removed (its
+`docker_dind-data` volume stays until you delete it with `docker volume rm`).
 
 The next push to `master` will deploy `origin/master` again, so also revert the
 bad commit on `master`.
