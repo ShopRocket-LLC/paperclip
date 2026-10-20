@@ -11,8 +11,9 @@ Note: every upstream merge pushed to `master` triggers a deploy.
 
 1. In `~/apps/paperclip` on the host: `git fetch origin master`, `git checkout master`,
    `git reset --hard origin/master` (no `git clean`, so untracked/ignored files survive).
-2. `cd docker && docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d`
-   (see "Agent tools" below).
+2. `cd docker && docker compose -f docker-compose.quickstart.yml up --build -d --remove-orphans`.
+   Only when the repository variable `PAPERCLIP_AGENT_TOOLS` is `true` does it also layer
+   `-f docker-compose.agent-tools.yml` (see "Agent tools" below).
 3. Polls `http://localhost:3100/` for HTTP 200 and container `docker-paperclip-1`
    running, up to 5 minutes. On failure it prints `docker logs --tail 50`, the
    previous SHA and the rollback command.
@@ -50,6 +51,15 @@ run code on the host; keep `master` protected (PR required) and restrict write a
 gives agents a Docker daemon and the .NET 8 SDK, so they can run okto-env /
 okto-stack test environments and build the C# parts of oktorocket. Without the
 overlay (upstream users), the image and stack are unchanged.
+
+**Disabled by default on release-bot.** The dind sidecar is privileged, and agents
+control its daemon, so with the overlay on, agents (and any PR code they run in a
+test stack) effectively have root on the host. release-bot also runs the okto-ops
+containers, including `okto-ops-monitor-prod-1` with prod AWS credentials. The
+overlay stays off until the okto-env boundary design (okto-ops
+`docs/okto-env-release-bot-boundary.md`, WP6) is approved and implemented. To turn
+it on, set the repository variable `PAPERCLIP_AGENT_TOOLS=true` and redeploy; to
+turn it off, delete the variable and redeploy (`--remove-orphans` removes dind).
 
 - **`dind` service** (`docker:29-dind`, `privileged`). Its daemon listens only on
   a unix socket in the `dind-socket` volume (no TCP listener). Images, containers
@@ -113,7 +123,9 @@ On a failed health check the job log shows the previous SHA. To roll back manual
 ```bash
 ssh release-bot
 git -C ~/apps/paperclip reset --hard <PREVIOUS_SHA>
-cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d
+cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml up --build -d --remove-orphans
+# only if PAPERCLIP_AGENT_TOOLS=true and <PREVIOUS_SHA> has the overlay:
+# docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d
 ```
 
 To roll back to a commit from before the agent-tools overlay existed, drop the
