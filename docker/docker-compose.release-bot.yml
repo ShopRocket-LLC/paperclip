@@ -46,6 +46,9 @@ services:
       OKTO_ENV_PUBLIC_HOST: "localhost"
       OKTO_ENV_BRIDGE: "1"
       PLAYWRIGHT_BROWSERS_PATH: "/opt/ms-playwright"
+      # codex_local agents filter their shell env; let these ambient names through
+      # (credential-looking names are ignored by the adapter).
+      PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "DOCKER_HOST OKTO_ENV_HOME OKTO_ENV_OKTOROCKET_REPO OKTO_ENV_DC_MANAGER_REPO OKTO_ENV_BIND_ADDR OKTO_ENV_PUBLIC_HOST PLAYWRIGHT_BROWSERS_PATH"
     volumes:
       - type: bind
         source: /srv/paperclip/run
