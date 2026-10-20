@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   gate:
-    uses: ./.github/workflows/ci-routing.yml
+    uses: ShopRocket-LLC/paperclip/.github/workflows/ci-routing.yml@master
 
   policy:
     needs: [gate]
