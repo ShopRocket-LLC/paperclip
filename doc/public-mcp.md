@@ -244,7 +244,7 @@ OAuth credential bodies and redirect locations are redacted from HTTP logs.
 | `paperclip_list_projects` | Safe project summary |
 | `paperclip_search_tasks` | Bounded task search with offset pagination |
 | `paperclip_read_task` | Current task plus recent comments/history |
-| `paperclip_create_task` | Assigned task, submitted to existing scheduling |
+| `paperclip_create_task` | Assigned task, submitted to existing scheduling; optional `initialPlan` becomes its `plan` document |
 | `paperclip_add_comment` | Human feedback; may wake or queue work |
 | `paperclip_list_deliverables` | Documents, attachments and work-product references |
 | `paperclip_read_document` | Durable document body and current revision |

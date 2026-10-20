@@ -616,6 +616,10 @@ describe.skipIf(!support.supported)("public MCP OAuth and tool boundary", () => 
       expect(paused).toHaveProperty("task.status", "todo");
       expect(paused.scheduling).toContain("does not guarantee execution has started");
       expect((await db.select().from(agents).where(eq(agents.id, agent!.id)))[0]?.status).toBe("paused");
+      // initialPlan is stored as the plan document in the same create, before any wake can read it.
+      const planned = await execute(f.tokens.access_token, "paperclip_create_task", { ...args, requestId: randomUUID(), title: "Implement the approved plan", initialPlan: "1. Do the work.\n2. Verify it." });
+      const plannedId = (planned.task as { id: string }).id;
+      expect(await later(f.tokens.access_token, "paperclip_read_document", { companyId: f.company.id, taskId: plannedId, key: "plan" })).toHaveProperty("document.body", "1. Do the work.\n2. Verify it.");
     } finally { wake.mockRestore(); }
   });
 

@@ -106,12 +106,12 @@ export const publicMcpCapabilities: Capability[] = [
   },
   {
     name: "paperclip_create_task", write: true,
-    description: "Delegate work by creating one durable task assigned to a Paperclip agent. This may schedule autonomous execution and consume the company's configured model budget. Normal permissions, approval gates and agent availability apply. Returns immediately; retrieve progress later. Never retry with a new requestId after an uncertain result.",
-    schema: z.object({ ...company, requestId, title: z.string().trim().min(1).max(200), description: z.string().max(50000), assigneeAgentId: z.uuid(), projectId: z.uuid().optional() }).strict(),
+    description: "Delegate work by creating one durable task assigned to a Paperclip agent. This may schedule autonomous execution and consume the company's configured model budget. Normal permissions, approval gates and agent availability apply. Returns immediately; retrieve progress later. Pass a plan as initialPlan (not in description) so it is saved as the task's plan document before execution starts. Never retry with a new requestId after an uncertain result.",
+    schema: z.object({ ...company, requestId, title: z.string().trim().min(1).max(200), description: z.string().max(50000), assigneeAgentId: z.uuid(), projectId: z.uuid().optional(), initialPlan: z.string().trim().min(1).max(200000).optional() }).strict(),
     run: async (p, a, api, origin) => {
       const result = await api(p, "POST", `/companies/${a.companyId}/issues`, {
         title: a.title, description: a.description, assigneeAgentId: a.assigneeAgentId,
-        ...(a.projectId ? { projectId: a.projectId } : {}), status: "todo",
+        ...(a.projectId ? { projectId: a.projectId } : {}), ...(a.initialPlan ? { initialPlan: a.initialPlan } : {}), status: "todo",
         idempotencyKey: `mcp:${hashMcpSecret(p.grant.companyId + ":" + p.grant.userId)}:${a.requestId}`,
       });
       return { task: pick(result, taskFields), url: origin + "/" + pathId(p.company.issuePrefix) + "/issues/" + pathId(object(result).identifier ?? object(result).id),
