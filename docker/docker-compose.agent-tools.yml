@@ -1,0 +1,65 @@
+# Agent tools overlay: Docker (through a Docker-in-Docker sidecar) and the
+# .NET 8 SDK for agents. Layer it on the quickstart file:
+#
+#   docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d
+#
+# Security model: agents get root over the `dind` daemon only. The host's
+# /var/run/docker.sock is never mounted, so agents cannot see or control
+# other containers on the host. The sidecar is `privileged` (dind needs it);
+# see docs/deploy-release-bot.md for what that does and does not protect.
+#
+# Networking: paperclip joins the sidecar's network namespace, so ports that
+# test stacks publish on 127.0.0.1 inside dind are reachable from paperclip
+# on 127.0.0.1 (okto-env health checks rely on this). Paperclip's own port is
+# therefore published on the dind service. The daemon listens only on a unix
+# socket in a shared volume: there is no TCP listener and no TLS to manage.
+
+services:
+  dind:
+    image: docker:29-dind
+    privileged: true
+    restart: unless-stopped
+    # Explicit dockerd args: the image's default adds a tcp://0.0.0.0:2375
+    # listener without TLS. 2375 is the docker group GID baked into the
+    # paperclip image. The address pool keeps nested networks off 172.x and
+    # 192.168.x (the default pools can shadow LAN routes).
+    command:
+      - dockerd
+      - --host=unix:///var/run/dind/docker.sock
+      - --group=2375
+      - --default-address-pool=base=10.231.0.0/16,size=24
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    # Caps for everything agents run, so test stacks cannot starve the host.
+    cpus: 12
+    mem_limit: 20g
+    memswap_limit: 20g
+    pids_limit: 8192
+    ports:
+      - "${PAPERCLIP_PORT:-3100}:3100"
+    volumes:
+      - dind-data:/var/lib/docker
+      - dind-socket:/var/run/dind
+      # Same host directory at the same path as in paperclip, so compose
+      # files in agent worktrees can bind-mount their sources.
+      - "${PAPERCLIP_DATA_DIR:-../data/docker-paperclip}:/paperclip"
+
+  paperclip:
+    build:
+      args:
+        INSTALL_AGENT_TOOLS: "1"
+    network_mode: "service:dind"
+    ports: !reset []
+    depends_on:
+      - dind
+    environment:
+      DOCKER_HOST: "unix:///var/run/dind/docker.sock"
+      DOTNET_ROOT: "/usr/share/dotnet"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    volumes:
+      - dind-socket:/var/run/dind
+
+volumes:
+  dind-data:
+  dind-socket:

@@ -50,7 +50,8 @@ jobs:
           set -euo pipefail
           cd "$APP_DIR/docker"
           # docker/.env is read automatically by compose; never print config.
-          docker compose -f docker-compose.quickstart.yml up --build -d
+          # agent-tools overlay: dind sidecar + .NET SDK for agents.
+          docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d
 
       - name: Health check
         run: |
@@ -71,7 +72,7 @@ jobs:
           docker logs --tail 50 "$CONTAINER" 2>&1 || true
           echo "Previous commit was: $(cat "$RUNNER_TEMP/prev_sha")"
           echo "Manual rollback (on release-bot):"
-          echo "  git -C ~/apps/paperclip reset --hard $(cat "$RUNNER_TEMP/prev_sha") && cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml up --build -d"
+          echo "  git -C ~/apps/paperclip reset --hard $(cat "$RUNNER_TEMP/prev_sha") && cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d"
           exit 1
 
       - name: Record deployed version and prune
