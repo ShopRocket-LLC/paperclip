@@ -9,6 +9,20 @@ log() {
 
 log "starting"
 
+# Optional localhost bridge for okto-env test stacks (release-bot overlay sets
+# OKTO_ENV_BRIDGE=1). Runs in the background as the app user, restarted if it
+# dies, and can never delay or fail the app start: the supervisor is detached,
+# a missing script is skipped, and nothing here is waited on. A run is
+# considered a config failure (exit 78) and not retried.
+start_okto_env_bridge() {
+    [ "${OKTO_ENV_BRIDGE:-}" = "1" ] || return 0
+    bridge_script="$(pwd)/scripts/okto-env-localhost-bridge.mjs"
+    [ -f "$bridge_script" ] || { log "okto-env bridge script missing; skipping"; return 0; }
+    log "starting okto-env localhost bridge"
+    # shellcheck disable=SC2016 # expands in the inner shell
+    $1 sh -c 'while :; do node "$1"; [ "$?" -eq 78 ] && break; sleep 5; done' sh "$bridge_script" </dev/null &
+}
+
 # Capture runtime UID/GID from environment variables, defaulting to 1000
 PUID=${USER_UID:-1000}
 PGID=${USER_GID:-1000}
@@ -23,6 +37,7 @@ if [ "$(id -u)" -ne 0 ]; then
     if [ "$(id -u)" -ne "$PUID" ] || [ "$(id -g)" -ne "$PGID" ]; then
         echo "docker-entrypoint.sh: running unprivileged as $(id -u):$(id -g); cannot remap to requested ${PUID}:${PGID}" >&2
     fi
+    start_okto_env_bridge ""
     log "starting app as $(id -u):$(id -g)"
     exec "$@"
 fi
@@ -148,5 +163,6 @@ if [ -d "$home_dir" ]; then
     fi
 fi
 
+start_okto_env_bridge "gosu node"
 log "starting app as node"
 exec gosu node "$@"

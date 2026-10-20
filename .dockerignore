@@ -8,6 +8,12 @@ coverage
 data
 tmp
 *.log
+# Deployment secrets (docker/.env on a deploy host) must never be baked into an
+# image layer. Tracked *.example templates stay in the context.
+**/.env
+**/.env.*
+!**/.env.*.example
+!**/.env.example
 packages/paperclip-runner/dist
 packages/paperclip-runner/runner/target
 packages/paperclip-runner/devtools

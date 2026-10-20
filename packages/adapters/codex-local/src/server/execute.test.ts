@@ -206,6 +206,28 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     expect(commandArgs.join(" ")).not.toContain("assigned-tool-token");
   });
 
+  it("passes only operator-listed, non-credential ambient variables to CLI shells", async () => {
+    vi.stubEnv("PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH", "DOCKER_HOST, OKTO_ENV_HOME,HOST_API_TOKEN not-a-name!");
+    vi.stubEnv("DOCKER_HOST", "unix:///srv/paperclip/run/docker.sock");
+    vi.stubEnv("OKTO_UNLISTED", "1");
+    const { commandArgs } = await runTeardown({ sandboxAuth: "{}", hostAuth: "{}", withIdentity: true });
+    const policy = commandArgs.find(arg => arg.startsWith("shell_environment_policy.include_only="));
+    const keys = JSON.parse(policy!.slice(policy!.indexOf("=") + 1));
+    expect(keys).toEqual(expect.arrayContaining(["DOCKER_HOST", "OKTO_ENV_HOME"]));
+    expect(keys).not.toContain("HOST_API_TOKEN");
+    expect(keys).not.toContain("OKTO_UNLISTED");
+    expect(keys).not.toContain("not-a-name!");
+  });
+
+  it("passes no extra ambient variables to CLI shells by default", async () => {
+    vi.stubEnv("PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH", "");
+    vi.stubEnv("DOCKER_HOST", "unix:///srv/paperclip/run/docker.sock");
+    const { commandArgs } = await runTeardown({ sandboxAuth: "{}", hostAuth: "{}", withIdentity: true });
+    const policy = commandArgs.find(arg => arg.startsWith("shell_environment_policy.include_only="));
+    const keys = JSON.parse(policy!.slice(policy!.indexOf("=") + 1));
+    expect(keys).not.toContain("DOCKER_HOST");
+  });
+
   it("collects stopped-provider instruction edits before a throwing remote restore", async () => {
     const order: string[] = [];
     prepareAdapterExecutionTargetRuntime.mockImplementationOnce(async () => ({

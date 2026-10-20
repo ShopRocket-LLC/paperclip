@@ -11,12 +11,14 @@ Note: every upstream merge pushed to `master` triggers a deploy.
 
 1. In `~/apps/paperclip` on the host: `git fetch origin master`, `git checkout master`,
    `git reset --hard origin/master` (no `git clean`, so untracked/ignored files survive).
-2. `cd docker && docker compose -f docker-compose.quickstart.yml up --build -d --remove-orphans`.
-   Only when the repository variable `PAPERCLIP_AGENT_TOOLS` is `true` does it also layer
-   `-f docker-compose.agent-tools.yml` (see "Agent tools" below).
-3. Polls `http://localhost:3100/` for HTTP 200 and container `docker-paperclip-1`
-   running, up to 5 minutes. On failure it prints `docker logs --tail 50`, the
-   previous SHA and the rollback command.
+2. `cd docker && docker compose -f docker-compose.quickstart.yml -f docker-compose.release-bot.yml up --build -d --remove-orphans`.
+   The release-bot overlay is always layered (see "Agent tools" below); there is no
+   switch that starts a different stack.
+3. Polls `http://localhost:3100/` and `http://localhost:3100/api/health` for HTTP 200
+   and container `docker-paperclip-1` running, up to 5 minutes. On failure it prints
+   `docker logs --tail 50`, the previous SHA and the rollback command. A final,
+   non-fatal step runs `docker exec -u node docker-paperclip-1 docker version` to
+   check the rootless Docker socket; a failure there warns but does not fail the deploy.
 4. Logs the deployed commit / image id and runs `docker image prune -f`
    (dangling only; never `-a`, never volumes).
 
@@ -27,8 +29,10 @@ The first build after a large upstream change can take 10+ minutes.
 
 - `~/apps/paperclip/docker/.env` (mode 600, untracked) holds `BETTER_AUTH_SECRET`,
   `PAPERCLIP_TOOL_ACTION_SIGNING_SECRET`, `PAPERCLIP_PUBLIC_URL`,
-  `PAPERCLIP_ALLOWED_HOSTNAMES`, `CLAUDE_CODE_OAUTH_TOKEN`. Compose reads it
-  automatically. It is not in GitHub secrets and the workflow never prints it.
+  `PAPERCLIP_ALLOWED_HOSTNAMES`, `CLAUDE_CODE_OAUTH_TOKEN`, and optionally
+  `PAPERCLIP_UID` / `PAPERCLIP_GID` (default `1001`, the host `paperclip` account;
+  see "Agent tools"). Compose reads it automatically. `.dockerignore` excludes
+  `.env` files, so `docker/.env` is never copied into an image layer. It is not in GitHub secrets and the workflow never prints it.
   Do not run `docker compose config` in CI logs (it expands secrets).
 - Persistent data is `~/apps/paperclip/data/docker-paperclip` (gitignored via
   `data/`). Never run `docker compose down -v`, `git clean -x`, or `rm -rf` in the clone.
@@ -45,76 +49,116 @@ by `github.repository == 'ShopRocket-LLC/paperclip'`. Never add `pull_request`,
 `runs-on: self-hosted` in any other workflow. Anyone who can push to `master` can
 run code on the host; keep `master` protected (PR required) and restrict write access.
 
-## Agent tools: Docker and .NET for agents
+## Agent tools: rootless Docker and Playwright for agents
 
-`docker/docker-compose.agent-tools.yml` is layered on the quickstart file. It
-gives agents a Docker daemon and the .NET 8 SDK, so they can run okto-env /
-okto-stack test environments and build the C# parts of oktorocket. Without the
-overlay (upstream users), the image and stack are unchanged.
+`docker/docker-compose.release-bot.yml` is layered on the quickstart file by every
+deploy. It lets agents run okto-env / okto-stack test environments with Docker and
+browser tests with Playwright, without giving them root on the host. Upstream users
+who do not layer it get the unchanged image and stack.
 
-**Disabled by default on release-bot.** The dind sidecar is privileged, and agents
-control its daemon, so with the overlay on, agents (and any PR code they run in a
-test stack) effectively have root on the host. release-bot also runs the okto-ops
-containers, including `okto-ops-monitor-prod-1` with prod AWS credentials. The
-overlay stays off until the okto-env boundary design (okto-ops
-`docs/okto-env-release-bot-boundary.md`, WP6) is approved and implemented. To turn
-it on, set the repository variable `PAPERCLIP_AGENT_TOOLS=true` and redeploy; to
-turn it off, delete the variable and redeploy (`--remove-orphans` removes dind).
+The old privileged Docker-in-Docker overlay (`docker-compose.agent-tools.yml`, switched
+by the repository variable `PAPERCLIP_AGENT_TOOLS`) is gone. The variable is no longer
+read and can be deleted. `--remove-orphans` removes a leftover `dind` container on the
+first deploy; its `docker_dind-data` volume stays until you run `docker volume rm`.
 
-- **`dind` service** (`docker:29-dind`, `privileged`). Its daemon listens only on
-  a unix socket in the `dind-socket` volume (no TCP listener). Images, containers
-  and volumes that agents create live in the `docker_dind-data` volume.
-- **Paperclip image** is built with `INSTALL_AGENT_TOOLS=1`: Docker CLI with the
-  compose v2 and buildx plugins (Docker's Debian repo), and the .NET 8 SDK
-  (`dotnet-install.sh --channel 8.0`; every oktorocket project targets `net8.0`).
-  `node` is in group `docker` (GID 2375), which owns the dind socket.
-  `DOCKER_HOST=unix:///var/run/dind/docker.sock`. It also has the system
-  libraries for Playwright's headless Chromium (`playwright install-deps`).
-  Browsers are not baked in: each repo runs `npx playwright install chromium`,
-  which caches the build matching its own Playwright version under
-  `/paperclip/.cache/ms-playwright` (persistent, shared across worktrees).
-- **Shared network namespace.** Paperclip runs with `network_mode: service:dind`,
-  so ports that test stacks publish on `127.0.0.1` in dind are reachable from
-  agents on `127.0.0.1`: okto-env health checks and Playwright tests use
-  `http://localhost:<port>`, with no `dind` hostname needed. Paperclip's port 3100 is therefore published on the
-  `dind` service. Nested networks use `10.231.0.0/16` so they never shadow LAN
-  routes. Avoid publishing port 3100 from a test stack.
-- **okto-env.** Keep `OKTO_ENV_HOME` under `/paperclip` (the default `~/.okto`
-  is), because its worktrees must be bind-mountable by dind.
-- **Bind mounts.** The data directory is mounted at `/paperclip` in both services,
-  so a compose file in an agent worktree (under `/paperclip/...`) can bind-mount
-  its sources. Paths outside `/paperclip` (for example `/tmp`) do not exist in
-  dind and come up as empty directories. Files that nested containers write as
-  root into a bind mount are root-owned, and `node` cannot delete them directly.
-  Remove them through dind (`docker run --rm -v "$PWD":/w alpine rm -rf /w/<dir>`).
-- **Resource limits** on `dind` (they cover every nested container): 12 CPUs,
-  20 GiB memory (no extra swap), 8192 pids. The host has 24 cores and 45 GiB;
-  okto-ops uses under 1 GiB and Paperclip about 2 GiB, so a runaway test stack
-  cannot starve okto-ops. Disk is not capped: check `docker system df` inside
-  dind and prune when needed (`docker exec -u node docker-paperclip-1 docker system prune -f`).
-- **Deploys.** A deploy recreates only `paperclip` when its image changes; `dind`
-  and running test stacks survive. A change to the `dind` service recreates both,
-  which stops test stacks (they restart if their restart policy says so).
+Host prerequisites (not managed by this repo or by compose):
+
+- A host account `paperclip`, uid/gid `1001`.
+- A rootless Docker daemon for that account with its socket at
+  `/srv/paperclip/run/docker.sock` (directory `/srv/paperclip/run`, owner 1001, mode 0700).
+- A workspace `/srv/paperclip/work`, owner 1001.
+
+What the overlay does:
+
+- **Runs as uid/gid 1001.** Build args and runtime `USER_UID` / `USER_GID` come from
+  `PAPERCLIP_UID` / `PAPERCLIP_GID` in `docker/.env` (default 1001). The image's `node`
+  user is built with that uid, and the entrypoint also remaps it at start-up. Agents
+  therefore have the same uid as the rootless daemon's owner.
+- **Image** is built with `INSTALL_AGENT_TOOLS=true`: the Docker CLI with the compose v2
+  and buildx plugins (Docker's Debian repo), plus `perl` (okto-env needs Perl `Fcntl`),
+  `jq` and `lsof`. There is no daemon in the image and `node` is **not** in a `docker`
+  group. `INSTALL_DOTNET=true` additionally installs the .NET 8 SDK; it is off here.
+- **Playwright.** `INSTALL_PLAYWRIGHT_BROWSERS=true` installs Playwright 1.62.1's
+  Chromium and its system libraries into `/opt/ms-playwright` (world readable and
+  executable), and `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright` is set. A repo whose
+  `@playwright/test` is a different version must either pin 1.62.1 or run
+  `npx playwright install chromium` itself (it will then try to write the same path,
+  which is read-only for `node`; unset `PLAYWRIGHT_BROWSERS_PATH` for that run).
+- **Docker access.** `DOCKER_HOST=unix:///srv/paperclip/run/docker.sock`. The host
+  `/srv/paperclip/run` directory is mounted read-only at the same path. The host's
+  `/var/run/docker.sock` is never mounted.
+- **Workspace.** `/srv/paperclip/work` is mounted read-write at the **same path** on
+  both sides. This is required: a compose file an agent runs is resolved by the host's
+  rootless daemon, so a bind-mount source path must mean the same thing in the container
+  and on the host. Both mounts use `create_host_path: false`, so a missing host
+  directory fails the start instead of creating a root-owned one.
+- **okto-env.** `OKTO_ENV_HOME=/srv/paperclip/work/okto-env`,
+  `OKTO_ENV_OKTOROCKET_REPO=/srv/paperclip/work/src/oktorocket`,
+  `OKTO_ENV_DC_MANAGER_REPO=/srv/paperclip/work/src/dc-manager`.
+- **Networking is unchanged**: the container stays on the compose default network
+  (`docker_default`, gateway `172.19.0.1`). Test stacks publish their ports on the
+  gateway (`OKTO_ENV_BIND_ADDR=172.19.0.1`). Avoid publishing port 3100 from a test stack.
+- **Localhost bridge.** Cognito Unified Login only accepts `http://localhost:9100-9900`
+  callbacks, so the browser in Paperclip must reach a test stack as `localhost:<port>`
+  (`OKTO_ENV_PUBLIC_HOST=localhost`). With `OKTO_ENV_BRIDGE=1` the entrypoint starts
+  `scripts/okto-env-localhost-bridge.mjs` in the background as the app user, restarting
+  it if it dies. It forwards `127.0.0.1:<port>` to `${OKTO_ENV_BIND_ADDR}:<port>` for
+  every base in `OKTO_ENV_BRIDGE_BASES` (default `9000,3020,3030,4000`) plus every offset
+  in `OKTO_ENV_BRIDGE_OFFSETS` (default `100-900:100`; a comma list of numbers or
+  `FROM-TO:STEP` ranges), for example 9100-9900, 3120-3920, 3130-3930 and 4100-4900.
+  Base 3000 is never bridged. A port that is already in use (such as Paperclip's 3100) is
+  logged and skipped; a refused upstream just closes that one connection. It runs
+  detached, so it cannot delay or fail Paperclip's start. Unit tests:
+  `pnpm test:okto-env-bridge`.
+
+### Agent environment
+
+Claude agents (`claude_local`) start with the container's environment, so they see all of
+the variables above. Codex agents (`codex_local`) run their shell commands with a filtered
+environment: only the configured agent env plus a fixed list of names. To expose container
+variables to Codex shells, either:
+
+- set `PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH` on the container (comma-separated names, for
+  example `DOCKER_HOST,PLAYWRIGHT_BROWSERS_PATH,OKTO_ENV_HOME,OKTO_ENV_OKTOROCKET_REPO,OKTO_ENV_DC_MANAGER_REPO,OKTO_ENV_BIND_ADDR,OKTO_ENV_PUBLIC_HOST`).
+  Names containing `key`, `secret` or `token` (case-insensitive) are ignored, as for the
+  per-agent env. Or
+- set the same variables in each agent's `env` config in Paperclip.
 
 ### Security model
 
-Agents have root over the dind daemon, not the host:
+Agents have the privileges of an unprivileged host account and of its rootless daemon:
 
-- The host socket `/var/run/docker.sock` is never mounted. Agents cannot list,
-  stop or exec into `docker-paperclip-1`, the okto-ops containers, or anything
-  else on the host daemon.
-- `dind` is `privileged`, which dind requires. A container escape from a nested
-  container, or an agent starting a nested container with `--privileged` and
-  host devices, reaches the dind container, which is privileged on the host. So
-  this is a strong boundary against mistakes and runaway stacks, not a boundary
-  against a malicious agent with kernel exploits. The full boundary design is
-  okto-ops WP6 (rootless runtime, separate user, explicit egress rules).
-- Through dind, agents can read and write everything under `/paperclip` (they
-  already can as `node`), including root-owned writes.
-- Nested containers on a non-internal network have outbound network access
-  through the host, like Paperclip itself, and can reach Paperclip's port 3100
-  through the dind gateway. okto-env's synthetic stacks use an `internal: true`
-  network, which has no route out.
+- There is no privileged container and no root-equivalent socket. The daemon runs as
+  uid 1001; "root" inside a nested container maps to uid 1001 on the host.
+- The host socket `/var/run/docker.sock` is never mounted. Agents cannot list, stop or
+  exec into `docker-paperclip-1`, the okto-ops containers, or anything else on the root
+  daemon.
+- Agents can read and write `/paperclip` (their data directory) and `/srv/paperclip/work`,
+  and control every container on the rootless daemon. They cannot read other host users'
+  files, such as `dcsupport`'s home or the okto-ops credentials.
+- Nested containers on a non-internal network have outbound network access through the
+  host, like Paperclip itself, and can reach Paperclip's port 3100 through the gateway.
+  okto-env's synthetic stacks use an `internal: true` network, which has no route out.
+- Resource limits and disk use are governed by the rootless daemon's host configuration,
+  not by this repo. Check `docker system df` as the `paperclip` account and prune when needed.
+
+### One-time migration: Paperclip data directory to uid 1001
+
+Before this change Paperclip ran as uid/gid 1000 (`dcsupport`). The data directory must be
+owned by 1001 before the first deploy of the overlay, so the container does not spend its
+start-up (the health check waits only 5 minutes) re-owning a large tree:
+
+```bash
+ssh release-bot
+cd ~/apps/paperclip/docker
+docker compose -f docker-compose.quickstart.yml stop   # stop Paperclip first
+sudo chown -R 1001:1001 ~/apps/paperclip/data/docker-paperclip   # or $PAPERCLIP_DATA_DIR
+```
+
+Then merge (or re-run the workflow). The entrypoint remaps `node` to 1001 and verifies
+ownership on every boot, so a missed chown is repaired automatically, only slower.
+`PAPERCLIP_UID` / `PAPERCLIP_GID` in `docker/.env` override the default 1001.
+To go back to the old uid, set both to `1000`, chown the directory back, and redeploy.
 
 ## Rollback
 
@@ -123,14 +167,13 @@ On a failed health check the job log shows the previous SHA. To roll back manual
 ```bash
 ssh release-bot
 git -C ~/apps/paperclip reset --hard <PREVIOUS_SHA>
-cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml up --build -d --remove-orphans
-# only if PAPERCLIP_AGENT_TOOLS=true and <PREVIOUS_SHA> has the overlay:
-# docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d
+cd ~/apps/paperclip/docker && docker compose -f docker-compose.quickstart.yml -f docker-compose.release-bot.yml up --build -d --remove-orphans
 ```
 
-To roll back to a commit from before the agent-tools overlay existed, drop the
-second `-f` and add `--remove-orphans` so the `dind` service is removed (its
-`docker_dind-data` volume stays until you delete it with `docker volume rm`).
+To roll back to a commit from before the release-bot overlay existed, drop the second
+`-f` (that commit has no overlay file). That also returns Paperclip to uid 1000 unless
+`PAPERCLIP_UID`/`PAPERCLIP_GID` are set in `docker/.env`; chown the data directory back
+to match (see the migration section) if you do.
 
 The next push to `master` will deploy `origin/master` again, so also revert the
 bad commit on `master`.

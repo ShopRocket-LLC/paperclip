@@ -187,6 +187,19 @@ function signalCodexChild(
   return false;
 }
 
+/**
+ * Operator-chosen ambient variables (for example DOCKER_HOST) that Codex shells
+ * may inherit from the Paperclip process. The operator lists variable names in
+ * PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH (comma or whitespace separated). Names
+ * that look like credentials are ignored, matching the filter applied to the
+ * per-agent env, so this cannot be used to leak a host secret into a shell.
+ */
+function readShellEnvPassthroughKeys(source: NodeJS.ProcessEnv): string[] {
+  return (source.PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH ?? "")
+    .split(/[\s,]+/)
+    .filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !/key|secret|token/i.test(key));
+}
+
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
   const raw = env[key];
   return typeof raw === "string" && raw.trim().length > 0;
@@ -1265,6 +1278,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           // Keep Codex's default secret-name exclusions except for the scoped
           // Paperclip API token used by the agent skill. Never include host env.
           ...Object.keys(env).filter(key => key === "PAPERCLIP_API_KEY" || !/key|secret|token/i.test(key)),
+          ...readShellEnvPassthroughKeys(process.env),
           ...identityNames,
         ])];
         args.unshift("-c", "features.shell_snapshot=false", "-c", 'shell_environment_policy.inherit="all"', "-c", "shell_environment_policy.ignore_default_excludes=true",
