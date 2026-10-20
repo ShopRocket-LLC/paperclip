@@ -9,11 +9,11 @@ data
 tmp
 *.log
 # Deployment secrets (docker/.env on a deploy host) must never be baked into an
-# image layer. Tracked *.example templates stay in the context.
+# image layer. No `!` re-includes here: a negation makes BuildKit walk excluded
+# directories (for example data/, owned by the app uid on release-bot), which
+# fails the build with "permission denied". The build needs no .env templates.
 **/.env
 **/.env.*
-!**/.env.*.example
-!**/.env.example
 packages/paperclip-runner/dist
 packages/paperclip-runner/runner/target
 packages/paperclip-runner/devtools
