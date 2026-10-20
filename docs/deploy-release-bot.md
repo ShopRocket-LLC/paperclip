@@ -58,12 +58,19 @@ overlay (upstream users), the image and stack are unchanged.
   compose v2 and buildx plugins (Docker's Debian repo), and the .NET 8 SDK
   (`dotnet-install.sh --channel 8.0`; every oktorocket project targets `net8.0`).
   `node` is in group `docker` (GID 2375), which owns the dind socket.
-  `DOCKER_HOST=unix:///var/run/dind/docker.sock`.
+  `DOCKER_HOST=unix:///var/run/dind/docker.sock`. It also has the system
+  libraries for Playwright's headless Chromium (`playwright install-deps`).
+  Browsers are not baked in: each repo runs `npx playwright install chromium`,
+  which caches the build matching its own Playwright version under
+  `/paperclip/.cache/ms-playwright` (persistent, shared across worktrees).
 - **Shared network namespace.** Paperclip runs with `network_mode: service:dind`,
   so ports that test stacks publish on `127.0.0.1` in dind are reachable from
-  agents on `127.0.0.1`. Paperclip's port 3100 is therefore published on the
+  agents on `127.0.0.1`: okto-env health checks and Playwright tests use
+  `http://localhost:<port>`, with no `dind` hostname needed. Paperclip's port 3100 is therefore published on the
   `dind` service. Nested networks use `10.231.0.0/16` so they never shadow LAN
   routes. Avoid publishing port 3100 from a test stack.
+- **okto-env.** Keep `OKTO_ENV_HOME` under `/paperclip` (the default `~/.okto`
+  is), because its worktrees must be bind-mountable by dind.
 - **Bind mounts.** The data directory is mounted at `/paperclip` in both services,
   so a compose file in an agent worktree (under `/paperclip/...`) can bind-mount
   its sources. Paths outside `/paperclip` (for example `/tmp`) do not exist in
