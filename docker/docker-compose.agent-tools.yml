@@ -21,12 +21,14 @@ services:
     restart: unless-stopped
     # Explicit dockerd args: the image's default adds a tcp://0.0.0.0:2375
     # listener without TLS. 2375 is the docker group GID baked into the
-    # paperclip image. The address pool keeps nested networks off 172.x and
-    # 192.168.x (the default pools can shadow LAN routes).
+    # paperclip image. The address pool keeps user-defined networks off 172.x
+    # and 192.168.x (the default pools can shadow LAN routes); --bip does the
+    # same for the default docker0 bridge, which the pool does not cover.
     command:
       - dockerd
       - --host=unix:///var/run/dind/docker.sock
       - --group=2375
+      - --bip=10.230.0.1/24
       - --default-address-pool=base=10.231.0.0/16,size=24
     environment:
       DOCKER_TLS_CERTDIR: ""
