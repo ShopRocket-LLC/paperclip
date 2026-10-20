@@ -50,6 +50,16 @@ services:
       # (credential-looking names are ignored by the adapter).
       PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "DOCKER_HOST OKTO_ENV_HOME OKTO_ENV_OKTOROCKET_REPO OKTO_ENV_DC_MANAGER_REPO OKTO_ENV_BIND_ADDR OKTO_ENV_PUBLIC_HOST PLAYWRIGHT_BROWSERS_PATH"
     volumes:
+      # App data lives outside the git checkout (and so outside the image build
+      # context). It is owned by the app uid, which the deploy user cannot read,
+      # and BuildKit walks excluded directories when .dockerignore has negations.
+      # Same target as quickstart's ../data/docker-paperclip mount, so this
+      # overrides it.
+      - type: bind
+        source: /srv/paperclip/data
+        target: /paperclip
+        bind:
+          create_host_path: false
       - type: bind
         source: /srv/paperclip/run
         target: /srv/paperclip/run

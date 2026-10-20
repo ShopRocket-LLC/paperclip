@@ -201,3 +201,11 @@ The registration token is short-lived and single-purpose; do not store it.
 To remove: `sudo ./svc.sh stop && sudo ./svc.sh uninstall && ./config.sh remove --token <new removal token>`
 (`gh api -X POST repos/ShopRocket-LLC/paperclip/actions/runners/remove-token`).
 Check status: `gh api repos/ShopRocket-LLC/paperclip/actions/runners` or `sudo ./svc.sh status`.
+
+## App data location (release-bot overlay)
+
+With the release-bot overlay, Paperclip's data lives at `/srv/paperclip/data` (owned by the app uid, 1001),
+not `~/apps/paperclip/data/docker-paperclip`. Keeping it out of the git checkout keeps it out of the image
+build context: the deploy user cannot read it, and BuildKit walks excluded directories when `.dockerignore`
+has `!` re-includes. Migration (once, with the stack stopped):
+`sudo mv ~/apps/paperclip/data/docker-paperclip /srv/paperclip/data`.
