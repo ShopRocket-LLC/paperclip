@@ -1,0 +1,60 @@
+# release-bot overlay: rootless Docker access and Playwright for agents.
+# Layer it on the quickstart file (the deploy workflow always does):
+#
+#   docker compose -f docker-compose.quickstart.yml -f docker-compose.release-bot.yml up --build -d --remove-orphans
+#
+# Security model: paperclip runs as the host account `paperclip` (uid/gid 1001
+# by default), not as a root-equivalent user. It reaches a ROOTLESS Docker
+# daemon owned by that same account through a unix socket; the host's
+# /var/run/docker.sock is never mounted and no privileged container exists.
+# The image carries only the Docker CLI, compose and buildx plugins.
+# See docs/deploy-release-bot.md.
+#
+# Host prerequisites (created outside this file, never by compose):
+#   /srv/paperclip/run/docker.sock  rootless daemon socket (dir 0700, uid 1001)
+#   /srv/paperclip/work             agent workspace (uid 1001)
+#
+# Paths under /srv/paperclip are mounted at the SAME path inside the container.
+# That is required: a compose file an agent runs resolves its bind mounts on the
+# host's rootless daemon, so a path must mean the same thing on both sides.
+#
+# Networking: unchanged. The container stays on the compose default network;
+# test stacks publish their ports on its gateway (172.19.0.1), which is
+# reachable from the container. A small in-container forwarder exposes those
+# ports on localhost too, so browsers can use http://localhost:<port>.
+
+services:
+  paperclip:
+    build:
+      args:
+        USER_UID: "${PAPERCLIP_UID:-1001}"
+        USER_GID: "${PAPERCLIP_GID:-1001}"
+        INSTALL_AGENT_TOOLS: "true"
+        INSTALL_PLAYWRIGHT_BROWSERS: "true"
+    environment:
+      USER_UID: "${PAPERCLIP_UID:-1001}"
+      USER_GID: "${PAPERCLIP_GID:-1001}"
+      DOCKER_HOST: "unix:///srv/paperclip/run/docker.sock"
+      OKTO_ENV_HOME: "/srv/paperclip/work/okto-env"
+      OKTO_ENV_OKTOROCKET_REPO: "/srv/paperclip/work/src/oktorocket"
+      OKTO_ENV_DC_MANAGER_REPO: "/srv/paperclip/work/src/dc-manager"
+      OKTO_ENV_BIND_ADDR: "172.19.0.1"
+      # The browser in Paperclip must reach test stacks as localhost:<port>
+      # (Cognito only accepts localhost callbacks). The entrypoint starts
+      # scripts/okto-env-localhost-bridge.mjs, which forwards 127.0.0.1:<port>
+      # to OKTO_ENV_BIND_ADDR:<port>.
+      OKTO_ENV_PUBLIC_HOST: "localhost"
+      OKTO_ENV_BRIDGE: "1"
+      PLAYWRIGHT_BROWSERS_PATH: "/opt/ms-playwright"
+    volumes:
+      - type: bind
+        source: /srv/paperclip/run
+        target: /srv/paperclip/run
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/paperclip/work
+        target: /srv/paperclip/work
+        bind:
+          create_host_path: false

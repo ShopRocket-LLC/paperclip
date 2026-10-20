@@ -46,34 +46,26 @@ jobs:
           git log -1 --format='%h %s'
 
       - name: Build and (re)create container
-        env:
-          PAPERCLIP_AGENT_TOOLS: ${{ vars.PAPERCLIP_AGENT_TOOLS }}
         run: |
           set -euo pipefail
           cd "$APP_DIR/docker"
           # docker/.env is read automatically by compose; never print config.
-          # agent-tools overlay (dind sidecar + .NET SDK for agents) is opt-in:
-          # the dind sidecar is privileged, which gives agents root on this host,
-          # and this host also runs okto-ops with prod AWS credentials. Keep it
-          # off until the okto-env boundary design (okto-ops WP6) is approved.
-          # Enable with the repository variable PAPERCLIP_AGENT_TOOLS=true.
-          if [ "${PAPERCLIP_AGENT_TOOLS:-}" = "true" ]; then
-            docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d
-          else
-            docker compose -f docker-compose.quickstart.yml up --build -d --remove-orphans
-          fi
+          # The release-bot overlay runs Paperclip as the host `paperclip`
+          # account (PAPERCLIP_UID/PAPERCLIP_GID in docker/.env, default 1001)
+          # with a rootless Docker socket mounted in. There is no privileged
+          # dind sidecar; --remove-orphans removes a leftover one.
+          docker compose -f docker-compose.quickstart.yml -f docker-compose.release-bot.yml up --build -d --remove-orphans
 
       - name: Health check
-        env:
-          PAPERCLIP_AGENT_TOOLS: ${{ vars.PAPERCLIP_AGENT_TOOLS }}
         run: |
           set -uo pipefail
           deadline=$((SECONDS + 300))
           while [ "$SECONDS" -lt "$deadline" ]; do
             state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)"
             code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:3100/ || true)"
-            echo "container=$state http=$code"
-            if [ "$state" = "running" ] && [ "$code" = "200" ]; then
+            health="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:3100/api/health || true)"
+            echo "container=$state http=$code api_health=$health"
+            if [ "$state" = "running" ] && [ "$code" = "200" ] && [ "$health" = "200" ]; then
               echo "Healthy."
               exit 0
             fi
@@ -84,16 +76,23 @@ jobs:
           docker logs --tail 50 "$CONTAINER" 2>&1 || true
           prev_sha="$(cat "$RUNNER_TEMP/prev_sha")"
           echo "Previous commit was: $prev_sha"
-          # A commit from before the agent-tools overlay has no overlay file;
-          # roll back to quickstart only and drop the orphaned dind service.
-          if [ "${PAPERCLIP_AGENT_TOOLS:-}" = "true" ] && git -C "$APP_DIR" cat-file -e "$prev_sha:docker/docker-compose.agent-tools.yml" 2>/dev/null; then
-            compose_cmd="docker compose -f docker-compose.quickstart.yml -f docker-compose.agent-tools.yml up --build -d"
-          else
-            compose_cmd="docker compose -f docker-compose.quickstart.yml up --build -d --remove-orphans"
-          fi
+          compose_cmd="docker compose -f docker-compose.quickstart.yml -f docker-compose.release-bot.yml up --build -d --remove-orphans"
           echo "Manual rollback (on release-bot):"
           echo "  git -C ~/apps/paperclip reset --hard $prev_sha && cd ~/apps/paperclip/docker && $compose_cmd"
           exit 1
+
+      # Non-fatal: checks the rootless Docker socket mount from the app user's
+      # point of view. The mount is new, so a failure here warns without failing
+      # (or rolling back) an otherwise healthy deploy. `docker exec` defaults to
+      # root in this image, so run as `node`, which is who agents run as.
+      - name: Check rootless Docker socket (non-fatal)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if ! docker exec -u node "$CONTAINER" docker version; then
+            echo "::warning::docker version failed as node in $CONTAINER: the rootless socket at /srv/paperclip/run/docker.sock is not usable by agents"
+            exit 1
+          fi
 
       - name: Record deployed version and prune
         if: success()
