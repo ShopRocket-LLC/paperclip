@@ -15,6 +15,7 @@ import {
   LEGACY_DISPOSITION_REPAIR_INSTRUCTION, type LegacyDispositionEpisode,
 } from "./legacy-continuation.js";
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE, hasLiveLegacyController } from "../legacy-controller-lease.js";
+import { CONVERSATION_CONTINUATION_POLICY, runUsedConversationAdapter } from "../conversation-continuation.js";
 import { isCompletedOnboardingHandoffWake } from "../chat-completion-delivery.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { isWaitingConversation, settleConversationTurn, deliverConversationComments } from "../agent-conversations.js";
@@ -540,6 +541,10 @@ const INTERACTION_CONTINUATION_REQUEUE_MAX_ATTEMPTS = 3;
 const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 3;
 const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
 const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
+// The periodic orphan reaper takes a dead legacy run once it has been idle for
+// 5 minutes, and records process_lost with its bounded retry. The stale-lock
+// backstop waits longer, so a quick restart cannot let it win that race.
+const ORPHANED_LEGACY_RUN_REAPER_GRACE_MS = 10 * 60 * 1000;
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
 const PROVIDER_QUOTA_ERROR_RE =
@@ -6048,6 +6053,26 @@ export function recoveryService(
       return { terminalized: false, status: run.status };
     }
 
+    // A legacy run whose process just died belongs to the orphan reaper first.
+    // The lease outlives a killed process by up to a minute, so after a quick
+    // restart this sweep could otherwise end the run before the reaper sees it.
+    if (!issueTerminalStatus && run.runtimeMode === "legacy") {
+      const lastLiveAt = Math.max(
+        run.updatedAt.getTime(),
+        run.controllerLeaseExpiresAt?.getTime() ?? 0,
+      );
+      if (Date.now() - lastLiveAt < ORPHANED_LEGACY_RUN_REAPER_GRACE_MS) {
+        return { terminalized: false, status: run.status };
+      }
+    }
+    // Mirror the reaper's process-loss record: a conversation adapter resumes
+    // with a fresh turn, so stranded-work recovery retries it instead of
+    // holding it for reconciliation.
+    const conversationContinuation =
+      !issueTerminalStatus &&
+      run.runtimeMode === "legacy" &&
+      (await runUsedConversationAdapter(db, run));
+
     const authority = issueTerminalStatus ? "issue_terminal" : "process_gone";
     const terminalStatus = issueTerminalStatus ?? "interrupted";
     const errorCode = issueTerminalStatus
@@ -6069,6 +6094,13 @@ export function recoveryService(
         errorCode:
           run.errorCode ??
           (terminalStatus === "interrupted" ? errorCode : null),
+        ...(conversationContinuation
+          ? {
+              resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(
+                { conversationContinuation: CONVERSATION_CONTINUATION_POLICY },
+              )}::jsonb`,
+            }
+          : {}),
         updatedAt: now,
       })
       .where(
