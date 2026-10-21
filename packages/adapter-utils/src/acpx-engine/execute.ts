@@ -2081,6 +2081,9 @@ async function buildRuntime(input: {
         // Preserve Codex's default secret-name exclusions. The short-lived
         // Paperclip API token is required by the agent skill's Bash/curl calls.
         ...Object.keys(env).filter(key => key === "PAPERCLIP_API_KEY" || !/key|secret|token/i.test(key)),
+        // Operator-listed ambient names (PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH),
+        // local targets only; the launch env carries them when they are set.
+        ...(executionTargetIsRemote ? [] : readShellEnvPassthroughKeys(process.env)),
       ])] } : {}),
       requestedModel,
       requestedThinkingEffort,

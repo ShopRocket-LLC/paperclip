@@ -626,6 +626,24 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(JSON.stringify(config)).not.toContain("assigned-tool-token");
   });
 
+  it("lets operator-listed, non-credential ambient names into Codex shells", async () => {
+    vi.stubEnv("PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH", "DOCKER_HOST OKTO_ENV_HOME HOST_API_TOKEN");
+    vi.stubEnv("DOCKER_HOST", "unix:///srv/paperclip/run/docker.sock");
+    vi.stubEnv("OKTO_ENV_HOME", "/srv/paperclip/work/okto-env");
+    vi.stubEnv("HOST_API_TOKEN", "host-token");
+    try {
+      const { meta } = await runExecutor({ agent: "codex" }, {
+        agentIdentity: { keyId: "sha256:test", publicKeyPem: "public", privateKeyPem: "private" },
+      });
+      const env = meta[0]?.env as Record<string, string>;
+      const config = JSON.parse(String(env.CODEX_CONFIG));
+      expect(config.shell_environment_policy.include_only).toEqual(expect.arrayContaining(["DOCKER_HOST", "OKTO_ENV_HOME"]));
+      expect(config.shell_environment_policy.include_only).not.toContain("HOST_API_TOKEN");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("forwards arbitrary Codex model IDs verbatim without picker-dependent session config", async () => {
     const arbitraryModel = "gpt-999-test-does-not-exist";
     const { configOptions, meta } = await runExecutor({
