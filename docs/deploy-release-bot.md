@@ -94,7 +94,14 @@ What the overlay does:
   directory fails the start instead of creating a root-owned one.
 - **okto-env.** `OKTO_ENV_HOME=/srv/paperclip/work/okto-env`,
   `OKTO_ENV_OKTOROCKET_REPO=/srv/paperclip/work/src/oktorocket`,
-  `OKTO_ENV_DC_MANAGER_REPO=/srv/paperclip/work/src/dc-manager`.
+  `OKTO_ENV_DC_MANAGER_REPO=/srv/paperclip/work/src/dc-manager`. The container's `PATH`
+  ends with `/srv/paperclip/work/okto-env/bin`, so `okto-env` resolves with no setup, and
+  `OKTO_ENV_ROOTLESS`, `OKTO_ENV_MEMORY_BUDGET` (24576 MiB), `OKTO_ENV_LOCK_WAIT`,
+  `OKTO_ENV_OFFSET_MAX` and `OKTO_ENV_PLAYWRIGHT_MODULE` are set. The controller itself is
+  installed on the host (not by compose): from the oktorocket clone at
+  `/srv/paperclip/work/src/oktorocket`, as the `paperclip` account,
+  `OKTO_ENV_HOME=/srv/paperclip/work/okto-env scripts/okto-env/install.sh --ref <sha>`.
+  The clone's `origin` is GitHub (the container's `gh` credential helper authenticates it).
 - **Networking is unchanged**: the container stays on the compose default network
   (`docker_default`, gateway `172.19.0.1`). Test stacks publish their ports on the
   gateway (`OKTO_ENV_BIND_ADDR=172.19.0.1`). Avoid publishing port 3100 from a test stack.

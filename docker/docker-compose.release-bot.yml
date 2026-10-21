@@ -53,9 +53,26 @@ services:
       OKTO_ENV_PUBLIC_HOST: "localhost"
       OKTO_ENV_BRIDGE: "1"
       PLAYWRIGHT_BROWSERS_PATH: "/opt/ms-playwright"
+      # `okto-env` resolves through the pinned controller's bin dir, appended to
+      # the image's PATH (compose cannot extend PATH, so this repeats it; keep it
+      # in step with the image). Install or re-pin the controller on the host:
+      # oktorocket scripts/okto-env/install.sh --ref <sha>, run with
+      # OKTO_ENV_HOME=/srv/paperclip/work/okto-env, owned by the paperclip account.
+      PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/srv/paperclip/work/okto-env/bin"
+      # Rootless daemon (the controller would detect it; stated so it cannot guess).
+      OKTO_ENV_ROOTLESS: "1"
+      # Stack budget in MiB: the rootless daemon's slice (user-1001.slice, 24G),
+      # not the host's MemTotal that `docker info` reports.
+      OKTO_ENV_MEMORY_BUDGET: "24576"
+      OKTO_ENV_LOCK_WAIT: "45m"
+      OKTO_ENV_OFFSET_MAX: "900"
+      # smoke-unified-login.mjs loads Playwright from here: pnpm's hoisted dir has
+      # no version hash in its path.
+      OKTO_ENV_PLAYWRIGHT_MODULE: "/app/node_modules/.pnpm/node_modules/playwright"
       # codex_local agents filter their shell env; let these ambient names through
-      # (credential-looking names are ignored by the adapter).
-      PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "DOCKER_HOST OKTO_ENV_HOME OKTO_ENV_OKTOROCKET_REPO OKTO_ENV_DC_MANAGER_REPO OKTO_ENV_BIND_ADDR OKTO_ENV_PUBLIC_HOST PLAYWRIGHT_BROWSERS_PATH"
+      # (credential-looking names are ignored by the adapter). PATH and HOME are
+      # always passed.
+      PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "DOCKER_HOST OKTO_ENV_HOME OKTO_ENV_OKTOROCKET_REPO OKTO_ENV_DC_MANAGER_REPO OKTO_ENV_BIND_ADDR OKTO_ENV_PUBLIC_HOST PLAYWRIGHT_BROWSERS_PATH OKTO_ENV_ROOTLESS OKTO_ENV_MEMORY_BUDGET OKTO_ENV_LOCK_WAIT OKTO_ENV_OFFSET_MAX OKTO_ENV_PLAYWRIGHT_MODULE"
     volumes:
       # App data lives outside the git checkout (and so outside the image build
       # context). It is owned by the app uid, which the deploy user cannot read,
