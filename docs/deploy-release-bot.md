@@ -151,7 +151,11 @@ expose container variables to agent shells on local targets, either:
 
 Jest defaults to one worker per core minus one, and an agent test run on this 24-core host
 once exhausted memory. The overlay sets `NODE_OPTIONS=--require /usr/local/lib/paperclip/jest-worker-cap.cjs`
-(and passes it through to agent shells). The preload adds `--maxWorkers=2` when the process
+(and passes it through to agent shells). Claude agents never receive it: the Claude Agent SDK
+deletes `NODE_OPTIONS` from the environment of the Claude process. Their Bash tool runs
+non-login `bash -c`, which reads `BASH_ENV`, so the overlay also sets
+`BASH_ENV=/usr/local/lib/paperclip/agent-shell-env.sh` (passed through), which re-adds the
+preload. The preload adds `--maxWorkers=2` when the process
 is the Jest CLI and the caller did not pass `--maxWorkers`, `--max-workers`, `-w`, `-i` or
 `--runInBand`. A `PATH` shim would not work: `npx`, `yarn`, `pnpm` and npm scripts all run the
 repo-local `node_modules/.bin/jest` ahead of `PATH`. Not covered: Jest run inside the nested
