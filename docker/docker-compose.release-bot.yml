@@ -76,9 +76,12 @@ services:
       PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/srv/paperclip/work/okto-env/bin"
       # Rootless daemon (the controller would detect it; stated so it cannot guess).
       OKTO_ENV_ROOTLESS: "1"
-      # Stack budget in MiB: the rootless daemon's slice (user-1001.slice, 24G),
-      # not the host's MemTotal that `docker info` reports.
-      OKTO_ENV_MEMORY_BUDGET: "24576"
+      # Stack budget in MiB, below the rootless slice's 24G MemoryMax. The budget
+      # check counts `docker stats` usage, which undercounts once stacks swap
+      # (real cost ~1.36 GiB per local stack, anon+swap). 16384 admits ~11-12
+      # local stacks, under the slice's memory and TasksMax limits (2026-10-21:
+      # 13 stacks hit TasksMax 8192 and crashed the rootless daemon).
+      OKTO_ENV_MEMORY_BUDGET: "16384"
       OKTO_ENV_LOCK_WAIT: "45m"
       # 30 slots (offsets 100..3000). Concurrency is limited by the memory
       # budget above, not by slots.
