@@ -77,7 +77,9 @@ What the overlay does:
 - **Image** is built with `INSTALL_AGENT_TOOLS=true`: the Docker CLI with the compose v2
   and buildx plugins (Docker's Debian repo), plus `perl` (okto-env needs Perl `Fcntl`),
   `jq` and `lsof`. There is no daemon in the image and `node` is **not** in a `docker`
-  group. `INSTALL_DOTNET=true` additionally installs the .NET 8 SDK; it is off here.
+  group. `INSTALL_DOTNET=true` additionally installs the .NET 8 SDK
+  (`/usr/local/bin/dotnet`); it is on here, because agents run oktorocket's .NET
+  suites.
 - **Playwright.** `INSTALL_PLAYWRIGHT_BROWSERS=true` installs Playwright 1.62.1's
   Chromium and its system libraries into `/opt/ms-playwright` (world readable and
   executable), and `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright` is set. A repo whose
