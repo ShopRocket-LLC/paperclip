@@ -70,6 +70,7 @@ import {
   isPaperclipExternalChatTurn,
   isPaperclipRuntimeEnvKey,
   joinPromptSections,
+  readShellEnvPassthroughKeys,
   materializePaperclipSkillCopy,
   parseObject,
   isPaperclipSkillSourceMissing,
@@ -643,11 +644,16 @@ const ACPX_INHERITED_PROVIDER_ENV_KEYS: Readonly<Record<string, ReadonlySet<stri
  * inherit. A runner-backed remote sandbox passes `false` and projects nothing.
  * Explicit adapter/runtime env is merged later and is intentionally not
  * restricted by this host projection.
+ *
+ * `shellEnvPassthrough` (local targets only) additionally lets through the
+ * operator-listed names in PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH, when set in
+ * the server environment. Credential-looking names are ignored.
  */
 export function projectAcpxInheritedHostEnvironment(
   inheritedEnv: NodeJS.ProcessEnv,
   acpxAgent: string,
   inheritHostEnvironment: boolean,
+  shellEnvPassthrough = false,
 ): Record<string, string> {
   // A runner-backed remote sandbox crosses a serialization boundary. Ambient
   // server state is never part of that contract: provider auth/config must be
@@ -656,6 +662,12 @@ export function projectAcpxInheritedHostEnvironment(
 
   const providerKeys = ACPX_INHERITED_PROVIDER_ENV_KEYS[acpxAgent];
   const projected: Record<string, string> = {};
+  if (shellEnvPassthrough) {
+    for (const key of readShellEnvPassthroughKeys(inheritedEnv)) {
+      const value = inheritedEnv[key];
+      if (typeof value === "string") projected[key] = value;
+    }
+  }
   for (const [key, value] of Object.entries(inheritedEnv)) {
     if (typeof value !== "string") continue;
     const normalizedKey = key.toUpperCase();
@@ -685,6 +697,7 @@ export function finalizeLaunchEnvironment(
   options: {
     acpxAgent: string;
     inheritHostEnvironment: boolean;
+    shellEnvPassthrough?: boolean;
     inheritedEnv?: NodeJS.ProcessEnv;
     platform?: typeof process.platform;
   },
@@ -2535,6 +2548,7 @@ async function buildRuntime(input: {
       runtimeEnv = finalizeLaunchEnvironment(env, [], {
         acpxAgent,
         inheritHostEnvironment: !useRemoteProcessSession,
+        shellEnvPassthrough: !executionTargetIsRemote,
       }).env;
     }
   } catch (err) {
@@ -2728,6 +2742,7 @@ function resolveRuntimeEnv(
   acpxAgent: string,
   options: {
     inheritHostEnvironment: boolean;
+    shellEnvPassthrough?: boolean;
     inheritedEnv?: NodeJS.ProcessEnv;
     platform?: typeof process.platform;
   },
@@ -2737,6 +2752,7 @@ function resolveRuntimeEnv(
     inheritedEnv,
     acpxAgent,
     options.inheritHostEnvironment,
+    options.shellEnvPassthrough,
   );
   const inheritedLaunchEnv = options.inheritHostEnvironment
     ? ensurePathInEnv(projectedHostEnv)

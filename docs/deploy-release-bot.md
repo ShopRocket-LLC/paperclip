@@ -120,15 +120,15 @@ What the overlay does:
 
 ### Agent environment
 
-Claude agents (`claude_local`) start with the container's environment, so they see all of
-the variables above. Codex agents (`codex_local`) run their shell commands with a filtered
-environment: only the configured agent env plus a fixed list of names. To expose container
-variables to Codex shells, either:
+Agents run their shell commands with a filtered environment: the configured agent env plus
+a fixed list of names (this applies to Codex agents (`codex_local`) and to Claude agents
+(`claude_local`) on the ACP engine; Claude's CLI engine inherits the container env). To
+expose container variables to agent shells on local targets, either:
 
 - set `PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH` on the container (comma-separated names, for
   example `DOCKER_HOST,PLAYWRIGHT_BROWSERS_PATH,OKTO_ENV_HOME,OKTO_ENV_OKTOROCKET_REPO,OKTO_ENV_DC_MANAGER_REPO,OKTO_ENV_BIND_ADDR,OKTO_ENV_PUBLIC_HOST`).
   Names containing `key`, `secret` or `token` (case-insensitive) are ignored, as for the
-  per-agent env. Or
+  per-agent env. Remote targets never receive them. `PATH` is always inherited. Or
 - set the same variables in each agent's `env` config in Paperclip.
 
 ### Security model

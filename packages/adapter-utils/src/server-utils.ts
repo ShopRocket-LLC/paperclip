@@ -3529,6 +3529,19 @@ export function sanitizeInheritedPaperclipEnv(
   return env;
 }
 
+/**
+ * Operator-chosen ambient variables (for example DOCKER_HOST) that agent shells
+ * may inherit from the Paperclip process. The operator lists variable names in
+ * PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH (comma or whitespace separated). Names
+ * that look like credentials are ignored, matching the filter applied to the
+ * per-agent env, so this cannot be used to leak a host secret into a shell.
+ */
+export function readShellEnvPassthroughKeys(source: NodeJS.ProcessEnv): string[] {
+  return (source.PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH ?? "")
+    .split(/[\s,]+/)
+    .filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !/key|secret|token/i.test(key));
+}
+
 export function defaultPathForPlatform() {
   if (process.platform === "win32") {
     return "C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem";
