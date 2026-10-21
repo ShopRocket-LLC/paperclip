@@ -3364,6 +3364,68 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(checkoutReleasedIssue?.checkoutRunId).toBeNull();
   });
 
+  it("leaves a recently live legacy run killed by a quick restart to the reaper's process-loss retry", async () => {
+    // A quick restart: the dead process's controller lease has just expired
+    // and the run wrote output moments before the kill.
+    const { agentId, runId, issueId } = await seedRunFixture({ agentStatus: "idle", processPid: 999_999_999 });
+    await db.update(heartbeatRuns).set({
+      controllerBootId: randomUUID(),
+      controllerLeaseExpiresAt: new Date(Date.now() - 5_000),
+      updatedAt: new Date(),
+    }).where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    expect((await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })).reaped).toBe(0);
+    expect((await heartbeat.sweepStaleIssueLocks()).terminalizedRunIds).toEqual([]);
+    expect((await selectRecoveryRunsByAgent(agentId)).map((run) => run.status)).toEqual(["running"]);
+
+    // The run stays idle until the periodic reaper's staleness window passes.
+    await db.update(heartbeatRuns).set({
+      controllerLeaseExpiresAt: new Date(Date.now() - 6 * 60 * 1000),
+      updatedAt: new Date(Date.now() - 6 * 60 * 1000),
+    }).where(eq(heartbeatRuns.id, runId));
+    expect((await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })).runIds).toEqual([runId]);
+
+    const runs = await selectRecoveryRunsByAgent(agentId);
+    expect(runs.find((run) => run.id === runId)).toMatchObject({
+      status: "failed",
+      errorCode: "process_lost",
+      resultJson: expect.objectContaining({ conversationContinuation: "continue_conversation_v1" }),
+    });
+    expect(runs.filter((run) => run.retryOfRunId === runId)).toEqual([
+      expect.objectContaining({ status: "scheduled_retry" }),
+    ]);
+    expect(await selectRecoveryActionsForIssue(issueId)).toEqual([]);
+  });
+
+  it("retries a conversation run the stale-lock backstop ended instead of holding it for reconciliation", async () => {
+    // Nothing took the dead run within the reaper grace window, so the
+    // stale-lock sweep remains its backstop.
+    const { agentId, runId, issueId } = await seedRunFixture({ agentStatus: "idle", processPid: 999_999_999 });
+    await db.update(heartbeatRuns).set({
+      controllerBootId: randomUUID(),
+      controllerLeaseExpiresAt: new Date(Date.now() - 11 * 60 * 1000),
+      updatedAt: new Date(Date.now() - 11 * 60 * 1000),
+    }).where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    expect((await heartbeat.sweepStaleIssueLocks()).terminalizedRunIds).toEqual([runId]);
+    const [terminalized] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(terminalized).toMatchObject({
+      status: "interrupted",
+      errorCode: "orphaned_running_run",
+      resultJson: expect.objectContaining({ conversationContinuation: "continue_conversation_v1" }),
+    });
+
+    await heartbeat.reconcileStrandedAssignedIssues();
+    await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect((await selectRecoveryRunsByAgent(agentId)).filter((run) => run.retryOfRunId === runId)).toEqual([
+      expect.objectContaining({ status: "scheduled_retry" }),
+    ]);
+    expect(await selectRecoveryActionsForIssue(issueId)).toEqual([]);
+  });
+
   it("requires reconciliation for a lost monitor whose provider outcomes are unknown", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       adapterType: "openclaw_gateway",

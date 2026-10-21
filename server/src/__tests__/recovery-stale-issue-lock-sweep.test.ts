@@ -106,6 +106,8 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
         status: "running",
         invocationSource: "manual",
         startedAt: new Date(),
+        // Past the orphan reaper's grace window, so the sweep is the backstop.
+        updatedAt: new Date(Date.now() - 11 * 60 * 1000),
       },
     ]);
 
