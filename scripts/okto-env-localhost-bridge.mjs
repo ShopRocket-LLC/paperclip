@@ -11,7 +11,11 @@
 //   OKTO_ENV_BIND_ADDR            upstream host (required)
 //   OKTO_ENV_BRIDGE_BASES         comma list of base ports   (default 9000,3020,3030,4000)
 //   OKTO_ENV_BRIDGE_OFFSETS       comma list of offsets: N, or A-B:STEP
-//                                 (default 100-900:100, i.e. 100,200,...,900)
+//                                 (default 100-${OKTO_ENV_OFFSET_MAX}:100: every
+//                                 slot the okto-env controller can hand out)
+//   OKTO_ENV_OFFSET_MAX           the controller's PORT_OFFSET ceiling (default 900)
+//   OKTO_ENV_SSO_RELAY_URL        http://localhost:<port> of the SSO relay; that
+//                                 port is never bridged (the relay listens there)
 //
 // Listened ports are every base + every offset. Base 3000 is never listened on
 // and bases themselves are not (only base + offset). A port already in use is
@@ -23,6 +27,30 @@ import { pathToFileURL } from "node:url";
 
 export const DEFAULT_BASES = "9000,3020,3030,4000";
 export const DEFAULT_OFFSETS = "100-900:100";
+
+/**
+ * Offsets to bridge: OKTO_ENV_BRIDGE_OFFSETS when set, else every offset the
+ * okto-env controller can allocate, 100 up to OKTO_ENV_OFFSET_MAX in steps of
+ * 100 (the same variable, validated the same way: a multiple of 100, 100..9900).
+ */
+export function offsetsFromEnv(env) {
+  if (env.OKTO_ENV_BRIDGE_OFFSETS !== undefined) return env.OKTO_ENV_BRIDGE_OFFSETS;
+  const max = env.OKTO_ENV_OFFSET_MAX;
+  if (max === undefined || max === "") return DEFAULT_OFFSETS;
+  if (!/^\d+$/.test(max) || Number(max) < 100 || Number(max) > 9900 || Number(max) % 100 !== 0) {
+    throw new Error(`invalid OKTO_ENV_OFFSET_MAX: ${JSON.stringify(max)}`);
+  }
+  return `100-${max}:100`;
+}
+
+/** The SSO relay's port (never bridged), or null when there is no relay. */
+export function relayPortFromEnv(env) {
+  const url = env.OKTO_ENV_SSO_RELAY_URL;
+  if (url === undefined || url === "") return null;
+  const match = /^http:\/\/localhost:(\d{2,5})$/.exec(url);
+  if (!match) throw new Error(`invalid OKTO_ENV_SSO_RELAY_URL: ${JSON.stringify(url)}`);
+  return Number(match[1]);
+}
 const MAX_PORT = 65535;
 const EXIT_CONFIG = 78; // tells the entrypoint's restart loop not to retry
 
@@ -55,15 +83,15 @@ export function parseOffsets(value) {
   return offsets;
 }
 
-/** Sorted, unique, valid ports: base + offset. Base 3000 is always dropped. */
-export function computePorts(basesValue = DEFAULT_BASES, offsetsValue = DEFAULT_OFFSETS) {
+/** Sorted, unique, valid ports: base + offset. Base 3000 and the excluded ports are always dropped. */
+export function computePorts(basesValue = DEFAULT_BASES, offsetsValue = DEFAULT_OFFSETS, exclude = []) {
   const bases = parseBases(basesValue).filter((base) => base !== 3000);
   const offsets = parseOffsets(offsetsValue);
   const ports = new Set();
   for (const base of bases) {
     for (const offset of offsets) {
       const port = base + offset;
-      if (port >= 1 && port <= MAX_PORT) ports.add(port);
+      if (port >= 1 && port <= MAX_PORT && !exclude.includes(port)) ports.add(port);
     }
   }
   return [...ports].sort((a, b) => a - b);
@@ -121,9 +149,11 @@ async function main() {
   }
   let ports;
   try {
+    const relayPort = relayPortFromEnv(process.env);
     ports = computePorts(
       process.env.OKTO_ENV_BRIDGE_BASES ?? DEFAULT_BASES,
-      process.env.OKTO_ENV_BRIDGE_OFFSETS ?? DEFAULT_OFFSETS,
+      offsetsFromEnv(process.env),
+      relayPort === null ? [] : [relayPort],
     );
   } catch (error) {
     log(`bad configuration: ${error.message}`);

@@ -60,9 +60,13 @@ services:
       # The browser in Paperclip must reach test stacks as localhost:<port>
       # (Cognito only accepts localhost callbacks). The entrypoint starts
       # scripts/okto-env-localhost-bridge.mjs, which forwards 127.0.0.1:<port>
-      # to OKTO_ENV_BIND_ADDR:<port>.
+      # to OKTO_ENV_BIND_ADDR:<port> for every slot up to OKTO_ENV_OFFSET_MAX.
       OKTO_ENV_PUBLIC_HOST: "localhost"
       OKTO_ENV_BRIDGE: "1"
+      # Shared SSO relay on localhost:9000 (a Cognito-listed callback). The
+      # entrypoint runs the pinned controller's relay there; ui-dev stacks sign
+      # in through it, so they are not limited to Cognito's ports 9100-9900.
+      OKTO_ENV_SSO_RELAY_URL: "http://localhost:9000"
       PLAYWRIGHT_BROWSERS_PATH: "/opt/ms-playwright"
       # `okto-env` resolves through the pinned controller's bin dir, appended to
       # the image's PATH (compose cannot extend PATH, so this repeats it; keep it
@@ -76,7 +80,9 @@ services:
       # not the host's MemTotal that `docker info` reports.
       OKTO_ENV_MEMORY_BUDGET: "24576"
       OKTO_ENV_LOCK_WAIT: "45m"
-      OKTO_ENV_OFFSET_MAX: "900"
+      # 30 slots (offsets 100..3000). Concurrency is limited by the memory
+      # budget above, not by slots.
+      OKTO_ENV_OFFSET_MAX: "3000"
       # smoke-unified-login.mjs loads Playwright from here: pnpm's hoisted dir has
       # no version hash in its path.
       OKTO_ENV_PLAYWRIGHT_MODULE: "/app/node_modules/.pnpm/node_modules/playwright"
@@ -87,7 +93,7 @@ services:
       # however launched (npx, yarn, pnpm, npm scripts); see the script header.
       # A per-agent NODE_OPTIONS in the agent's env config replaces this.
       NODE_OPTIONS: "--require /usr/local/lib/paperclip/jest-worker-cap.cjs"
-      PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "NODE_OPTIONS DOCKER_HOST OKTO_ENV_HOME OKTO_ENV_OKTOROCKET_REPO OKTO_ENV_DC_MANAGER_REPO OKTO_ENV_BIND_ADDR OKTO_ENV_PUBLIC_HOST PLAYWRIGHT_BROWSERS_PATH OKTO_ENV_ROOTLESS OKTO_ENV_MEMORY_BUDGET OKTO_ENV_LOCK_WAIT OKTO_ENV_OFFSET_MAX OKTO_ENV_PLAYWRIGHT_MODULE"
+      PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "NODE_OPTIONS DOCKER_HOST OKTO_ENV_HOME OKTO_ENV_OKTOROCKET_REPO OKTO_ENV_DC_MANAGER_REPO OKTO_ENV_BIND_ADDR OKTO_ENV_PUBLIC_HOST PLAYWRIGHT_BROWSERS_PATH OKTO_ENV_ROOTLESS OKTO_ENV_MEMORY_BUDGET OKTO_ENV_LOCK_WAIT OKTO_ENV_OFFSET_MAX OKTO_ENV_SSO_RELAY_URL OKTO_ENV_PLAYWRIGHT_MODULE"
     volumes:
       # App data lives outside the git checkout (and so outside the image build
       # context). It is owned by the app uid, which the deploy user cannot read,

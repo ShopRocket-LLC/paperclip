@@ -99,7 +99,8 @@ What the overlay does:
   `OKTO_ENV_DC_MANAGER_REPO=/srv/paperclip/work/src/dc-manager`. The container's `PATH`
   ends with `/srv/paperclip/work/okto-env/bin`, so `okto-env` resolves with no setup, and
   `OKTO_ENV_ROOTLESS`, `OKTO_ENV_MEMORY_BUDGET` (24576 MiB), `OKTO_ENV_LOCK_WAIT`,
-  `OKTO_ENV_OFFSET_MAX` and `OKTO_ENV_PLAYWRIGHT_MODULE` are set. The controller itself is
+  `OKTO_ENV_OFFSET_MAX` (3000: 30 slots; the memory budget, not the slot count, limits
+  how many run), `OKTO_ENV_SSO_RELAY_URL` and `OKTO_ENV_PLAYWRIGHT_MODULE` are set. The controller itself is
   installed on the host (not by compose): from the oktorocket clone at
   `/srv/paperclip/work/src/oktorocket`, as the `paperclip` account,
   `OKTO_ENV_HOME=/srv/paperclip/work/okto-env scripts/okto-env/install.sh --ref <sha>`.
@@ -107,18 +108,29 @@ What the overlay does:
 - **Networking is unchanged**: the container stays on the compose default network
   (`docker_default`, gateway `172.19.0.1`). Test stacks publish their ports on the
   gateway (`OKTO_ENV_BIND_ADDR=172.19.0.1`). Avoid publishing port 3100 from a test stack.
-- **Localhost bridge.** Cognito Unified Login only accepts `http://localhost:9100-9900`
+- **Localhost bridge.** Cognito Unified Login only accepts `http://localhost:9000-9900`
   callbacks, so the browser in Paperclip must reach a test stack as `localhost:<port>`
   (`OKTO_ENV_PUBLIC_HOST=localhost`). With `OKTO_ENV_BRIDGE=1` the entrypoint starts
   `scripts/okto-env-localhost-bridge.mjs` in the background as the app user, restarting
   it if it dies. It forwards `127.0.0.1:<port>` to `${OKTO_ENV_BIND_ADDR}:<port>` for
   every base in `OKTO_ENV_BRIDGE_BASES` (default `9000,3020,3030,4000`) plus every offset
-  in `OKTO_ENV_BRIDGE_OFFSETS` (default `100-900:100`; a comma list of numbers or
-  `FROM-TO:STEP` ranges), for example 9100-9900, 3120-3920, 3130-3930 and 4100-4900.
-  Base 3000 is never bridged. A port that is already in use (such as Paperclip's 3100) is
+  the controller can hand out, `100-${OKTO_ENV_OFFSET_MAX}:100` (`OKTO_ENV_BRIDGE_OFFSETS`,
+  a comma list of numbers or `FROM-TO:STEP` ranges, overrides it). Slot N is offset
+  100·N: with 3000 that is 9100-12000, 3120-6020, 3130-6030 and 4100-7000 in steps of
+  100, 120 ports. Base 3000 and the SSO relay's port are never bridged. A port that is already in use (such as Paperclip's 3100) is
   logged and skipped; a refused upstream just closes that one connection. It runs
   detached, so it cannot delay or fail Paperclip's start. Unit tests:
   `pnpm test:okto-env-bridge`.
+- **SSO relay.** A stack above slot 9 (dc-user past 9900) is not a Cognito callback.
+  With `OKTO_ENV_SSO_RELAY_URL=http://localhost:9000` the entrypoint runs oktorocket's
+  SSO relay on `127.0.0.1:9000` (a listed callback), supervised like the bridge: the
+  pinned controller's copy, `$OKTO_ENV_HOME/sso-relay.cjs`, which `install.sh` links
+  (until one is installed the supervisor waits). The okto-env controller records the
+  relay on each ui-dev lease and points that stack's dc-user at it: Cognito returns to
+  `localhost:9000/workspace`, and the relay redirects the code to the stack that started
+  the sign-in (its origin is in the `okto_sso_return` cookie), only ever to a localhost
+  origin. It is per container, so a Paperclip redeploy restarts it with the container;
+  stacks keep running on the host daemon and sign in again once it is back.
 
 ### Agent environment
 
