@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -30,6 +30,14 @@ function argvSeenBy(script, args) {
 test("caps the Jest CLI at two workers when none was requested", () => {
   assert.deepEqual(argvSeenBy(jestCli, ["path/to/a.test.js"]), ["--maxWorkers=2", "path/to/a.test.js"]);
   assert.deepEqual(argvSeenBy(jestCliPackage, []), ["--maxWorkers=2"]);
+});
+
+test("caps the Jest CLI when launched through the node_modules/.bin symlink", () => {
+  const bin = path.join(root, "node_modules/.bin/jest");
+  mkdirSync(path.dirname(bin), { recursive: true });
+  symlinkSync(jestCli, bin);
+  assert.deepEqual(argvSeenBy(bin, ["a.test.js"]), ["--maxWorkers=2", "a.test.js"]);
+  assert.deepEqual(argvSeenBy(bin, ["-w", "3"]), ["-w", "3"]);
 });
 
 test("leaves a caller-chosen worker count alone", () => {

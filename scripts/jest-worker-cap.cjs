@@ -12,7 +12,14 @@
 const MAX_WORKERS = 2;
 
 try {
-  const main = process.argv[1] || "";
+  // npm and yarn link node_modules/.bin/jest as a symlink, and Node leaves
+  // process.argv[1] as that link path, so resolve it to the real jest/bin/jest.js.
+  let main = process.argv[1] || "";
+  try {
+    main = require("node:fs").realpathSync(main);
+  } catch {
+    // Keep the path as given.
+  }
   if (/[\\/](jest|jest-cli)[\\/]bin[\\/]jest\.js$/.test(main)) {
     const args = process.argv.slice(2);
     const chosen = args.some(
