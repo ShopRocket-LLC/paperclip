@@ -6,8 +6,10 @@ import {
   DEFAULT_BASES,
   DEFAULT_OFFSETS,
   computePorts,
+  offsetsFromEnv,
   parseBases,
   parseOffsets,
+  relayPortFromEnv,
   startBridge,
 } from "./okto-env-localhost-bridge.mjs";
 
@@ -37,6 +39,37 @@ test("computePorts drops base 3000, dedupes, sorts and bounds ports", () => {
   assert.deepEqual(computePorts("3000,10", "1,2"), [11, 12]);
   assert.deepEqual(computePorts("100,200", "100"), [200, 300]);
   assert.deepEqual(computePorts("65000", "100,1000"), [65100]);
+});
+
+test("offsets come from the controller's OKTO_ENV_OFFSET_MAX unless OKTO_ENV_BRIDGE_OFFSETS overrides them", () => {
+  assert.equal(offsetsFromEnv({}), DEFAULT_OFFSETS);
+  assert.equal(offsetsFromEnv({ OKTO_ENV_OFFSET_MAX: "" }), DEFAULT_OFFSETS);
+  assert.equal(offsetsFromEnv({ OKTO_ENV_OFFSET_MAX: "3000" }), "100-3000:100");
+  assert.equal(offsetsFromEnv({ OKTO_ENV_OFFSET_MAX: "3000", OKTO_ENV_BRIDGE_OFFSETS: "100,200" }), "100,200");
+  for (const bad of ["950", "0", "10000", "3e3", "-100"]) {
+    assert.throws(() => offsetsFromEnv({ OKTO_ENV_OFFSET_MAX: bad }), /invalid OKTO_ENV_OFFSET_MAX/, bad);
+  }
+});
+
+test("release-bot (OKTO_ENV_OFFSET_MAX=3000): all 30 slots of all four services, 120 ports, never the relay's 9000", () => {
+  const env = { OKTO_ENV_OFFSET_MAX: "3000", OKTO_ENV_SSO_RELAY_URL: "http://localhost:9000" };
+  const ports = computePorts(DEFAULT_BASES, offsetsFromEnv(env), [relayPortFromEnv(env)]);
+  assert.equal(ports.length, 120);
+  for (let slot = 1; slot <= 30; slot += 1) {
+    for (const base of [9000, 3020, 3030, 4000]) assert.ok(ports.includes(base + 100 * slot), `${base} slot ${slot}`);
+  }
+  assert.ok(!ports.includes(9000) && !ports.includes(3100));
+  assert.equal(Math.max(...ports), 12000);
+});
+
+test("the relay's port is never bridged, even where a base + offset lands on it", () => {
+  assert.equal(relayPortFromEnv({}), null);
+  assert.equal(relayPortFromEnv({ OKTO_ENV_SSO_RELAY_URL: "" }), null);
+  assert.ok(computePorts("4000", "5000").includes(9000));
+  assert.deepEqual(computePorts("4000", "4900,5000", [9000]), [8900]);
+  for (const bad of ["https://localhost:9000", "http://127.0.0.1:9000", "http://localhost:9000/", "localhost:9000"]) {
+    assert.throws(() => relayPortFromEnv({ OKTO_ENV_SSO_RELAY_URL: bad }), /invalid OKTO_ENV_SSO_RELAY_URL/, bad);
+  }
 });
 
 function listen(server, host = "127.0.0.1") {

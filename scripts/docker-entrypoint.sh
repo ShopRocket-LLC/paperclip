@@ -23,6 +23,30 @@ start_okto_env_bridge() {
     $1 sh -c 'while :; do node "$1"; [ "$?" -eq 78 ] && break; sleep 5; done' sh "$bridge_script" </dev/null &
 }
 
+# Optional SSO relay for okto-env dev-connected test stacks (release-bot overlay
+# sets OKTO_ENV_SSO_RELAY_URL=http://localhost:9000). Cognito returns every
+# sign-in to the relay's /workspace, and the relay redirects it to the stack
+# that started it, so stacks can use any localhost port. It is the pinned okto-env
+# controller's copy ($OKTO_ENV_HOME/sso-relay.cjs, linked by oktorocket
+# scripts/okto-env/install.sh), on 127.0.0.1 only. Supervised like the bridge;
+# until a controller with the relay is installed it waits, and nothing here is
+# waited on.
+start_okto_env_sso_relay() {
+    case "${OKTO_ENV_SSO_RELAY_URL:-}" in
+        "") return 0 ;;
+        http://localhost:[0-9]*) relay_port="${OKTO_ENV_SSO_RELAY_URL#http://localhost:}" ;;
+        *) log "OKTO_ENV_SSO_RELAY_URL is not http://localhost:<port>; SSO relay not started"; return 0 ;;
+    esac
+    case "$relay_port" in
+        *[!0-9]*) log "OKTO_ENV_SSO_RELAY_URL is not http://localhost:<port>; SSO relay not started"; return 0 ;;
+    esac
+    relay_script="${OKTO_ENV_HOME:-/srv/paperclip/work/okto-env}/sso-relay.cjs"
+    log "starting okto-env SSO relay on 127.0.0.1:${relay_port}"
+    # shellcheck disable=SC2016 # expands in the inner shell
+    $1 sh -c 'while :; do if [ -f "$1" ]; then PORT="$2" HOST=127.0.0.1 node "$1"; sleep 5; else sleep 60; fi; done' \
+        sh "$relay_script" "$relay_port" </dev/null &
+}
+
 # Capture runtime UID/GID from environment variables, defaulting to 1000
 PUID=${USER_UID:-1000}
 PGID=${USER_GID:-1000}
@@ -38,6 +62,7 @@ if [ "$(id -u)" -ne 0 ]; then
         echo "docker-entrypoint.sh: running unprivileged as $(id -u):$(id -g); cannot remap to requested ${PUID}:${PGID}" >&2
     fi
     start_okto_env_bridge ""
+    start_okto_env_sso_relay ""
     log "starting app as $(id -u):$(id -g)"
     exec "$@"
 fi
@@ -164,5 +189,6 @@ if [ -d "$home_dir" ]; then
 fi
 
 start_okto_env_bridge "gosu node"
+start_okto_env_sso_relay "gosu node"
 log "starting app as node"
 exec gosu node "$@"
