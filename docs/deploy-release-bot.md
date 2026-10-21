@@ -146,6 +146,26 @@ repo-local `node_modules/.bin/jest` ahead of `PATH`. Not covered: Jest run insid
 test stacks of the rootless daemon (separate containers), an agent whose own `env` config sets
 `NODE_OPTIONS`, and a `maxWorkers` set in a repo's Jest config (the CLI flag overrides it).
 
+### Memory-pressure kills (systemd-oomd)
+
+The host runs `systemd-oomd` (package `systemd-oomd`, pinned to the installed systemd
+version) for the agent workloads only: `user-1001.slice` (the rootless daemon and its test
+stacks) and `paperclip.slice` (this container, through `cgroup_parent` in the overlay). Each
+has `ManagedOOMMemoryPressure=kill` with a 70% limit (oomd's default 20 s duration). The host
+files, which this repo does not deploy:
+
+- `/etc/systemd/system/paperclip.slice`: `[Slice]` with `MemoryAccounting=yes`,
+  `ManagedOOMMemoryPressure=kill`, `ManagedOOMMemoryPressureLimit=70%`.
+- `/etc/systemd/system/user-1001.slice.d/oomd.conf`: the same three settings.
+- `/etc/systemd/system/user@.service.d/99-oomd-agent-workloads-only.conf`: `[Service]`
+  `ManagedOOMMemoryPressure=auto`. The package otherwise enables 50% kills for every user
+  manager, which would cover other accounts.
+
+Nothing else is monitored (`oomctl` lists only those cgroups) and nothing is swap-monitored
+(`ManagedOOMSwap=auto` on the root slice), so `system.slice` and the okto-ops containers are
+never oomd targets. When the container is killed, its restart policy brings it back; a kill
+takes every agent run in it down, which is the trade for the host staying up.
+
 ### Security model
 
 Agents have the privileges of an unprivileged host account and of its rootless daemon:
