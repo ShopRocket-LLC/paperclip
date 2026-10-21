@@ -135,6 +135,17 @@ expose container variables to agent shells on local targets, either:
   which otherwise reset `PATH`. Or
 - set the same variables in each agent's `env` config in Paperclip.
 
+### Jest worker cap
+
+Jest defaults to one worker per core minus one, and an agent test run on this 24-core host
+once exhausted memory. The overlay sets `NODE_OPTIONS=--require /usr/local/lib/paperclip/jest-worker-cap.cjs`
+(and passes it through to agent shells). The preload adds `--maxWorkers=2` when the process
+is the Jest CLI and the caller did not pass `--maxWorkers`, `--max-workers`, `-w`, `-i` or
+`--runInBand`. A `PATH` shim would not work: `npx`, `yarn`, `pnpm` and npm scripts all run the
+repo-local `node_modules/.bin/jest` ahead of `PATH`. Not covered: Jest run inside the nested
+test stacks of the rootless daemon (separate containers), an agent whose own `env` config sets
+`NODE_OPTIONS`, and a `maxWorkers` set in a repo's Jest config (the CLI flag overrides it).
+
 ### Security model
 
 Agents have the privileges of an unprivileged host account and of its rootless daemon:

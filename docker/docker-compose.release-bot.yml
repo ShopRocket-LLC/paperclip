@@ -75,7 +75,11 @@ services:
       # codex_local and claude_local (ACP) agents filter their shell env; let these ambient names through
       # (credential-looking names are ignored by the adapter). PATH and HOME are
       # always passed.
-      PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "DOCKER_HOST OKTO_ENV_HOME OKTO_ENV_OKTOROCKET_REPO OKTO_ENV_DC_MANAGER_REPO OKTO_ENV_BIND_ADDR OKTO_ENV_PUBLIC_HOST PLAYWRIGHT_BROWSERS_PATH OKTO_ENV_ROOTLESS OKTO_ENV_MEMORY_BUDGET OKTO_ENV_LOCK_WAIT OKTO_ENV_OFFSET_MAX OKTO_ENV_PLAYWRIGHT_MODULE"
+      # Caps Jest at --maxWorkers=2 for every Jest CLI run in this container,
+      # however launched (npx, yarn, pnpm, npm scripts); see the script header.
+      # A per-agent NODE_OPTIONS in the agent's env config replaces this.
+      NODE_OPTIONS: "--require /usr/local/lib/paperclip/jest-worker-cap.cjs"
+      PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "NODE_OPTIONS DOCKER_HOST OKTO_ENV_HOME OKTO_ENV_OKTOROCKET_REPO OKTO_ENV_DC_MANAGER_REPO OKTO_ENV_BIND_ADDR OKTO_ENV_PUBLIC_HOST PLAYWRIGHT_BROWSERS_PATH OKTO_ENV_ROOTLESS OKTO_ENV_MEMORY_BUDGET OKTO_ENV_LOCK_WAIT OKTO_ENV_OFFSET_MAX OKTO_ENV_PLAYWRIGHT_MODULE"
     volumes:
       # App data lives outside the git checkout (and so outside the image build
       # context). It is owned by the app uid, which the deploy user cannot read,

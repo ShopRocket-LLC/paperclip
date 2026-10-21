@@ -50,6 +50,7 @@
     "check:module-boundaries": "node scripts/check-module-boundaries.mjs",
     "test:check-no-git-push": "node --test scripts/check-no-git-push.test.mjs",
     "test:okto-env-bridge": "node --test scripts/okto-env-localhost-bridge.test.mjs",
+    "test:jest-worker-cap": "node --test scripts/jest-worker-cap.test.mjs",
     "test:install-sh-docker": "./scripts/test-install-sh-docker.sh",
     "test:hermes-gateway-smoke": "node --test scripts/smoke/hermes-gateway-smoke.test.mjs",
     "docs:dev": "cd docs && npx mintlify dev",
