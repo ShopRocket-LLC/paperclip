@@ -31,6 +31,13 @@ services:
         USER_GID: "${PAPERCLIP_GID:-1001}"
         INSTALL_AGENT_TOOLS: "true"
         INSTALL_PLAYWRIGHT_BROWSERS: "true"
+    # Memory cap. Without it one agent's test run (jest defaults to one worker
+    # per core: 23 workers x ~1.5 GB) exhausted the 45 GB host and hung it
+    # (2026-10-21). Budget: test stacks 24G (user-1001.slice), Paperclip 16G,
+    # host + okto-ops the rest. Over the cap the kernel kills inside this
+    # container only. No swap above the cap.
+    mem_limit: "${PAPERCLIP_MEM_LIMIT:-16g}"
+    memswap_limit: "${PAPERCLIP_MEM_LIMIT:-16g}"
     environment:
       USER_UID: "${PAPERCLIP_UID:-1001}"
       USER_GID: "${PAPERCLIP_GID:-1001}"
