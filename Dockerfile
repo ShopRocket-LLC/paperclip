@@ -239,6 +239,7 @@ COPY scripts/docker-entrypoint.sh /usr/local/bin/
 # Jest worker cap, preloaded only when an overlay sets NODE_OPTIONS=--require to it
 # (docker/docker-compose.release-bot.yml). Inert otherwise.
 COPY scripts/jest-worker-cap.cjs /usr/local/lib/paperclip/jest-worker-cap.cjs
+COPY scripts/agent-shell-env.sh /usr/local/lib/paperclip/agent-shell-env.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 COPY --chown=node:node --from=build /app /app

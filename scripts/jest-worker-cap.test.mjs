@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -42,4 +42,20 @@ test("leaves a caller-chosen worker count alone", () => {
 
 test("does nothing for other Node programs", () => {
   assert.deepEqual(argvSeenBy(other, ["--foo"]), ["--foo"]);
+});
+
+test("agent shell hook re-adds the preload once and keeps other NODE_OPTIONS", () => {
+  const hook = path.join(path.dirname(preload), "agent-shell-env.sh");
+  // The hook only acts when the preload is installed at its image path; stub the
+  // check by running against a copy that points at this repo's file.
+  const patched = path.join(root, "agent-shell-env.sh");
+  writeFileSync(
+    patched,
+    readFileSync(hook, "utf8").replaceAll("/usr/local/lib/paperclip/jest-worker-cap.cjs", preload),
+  );
+  const run = (env) =>
+    spawnSync("bash", ["-c", `. "${patched}"; . "${patched}"; echo "\${NODE_OPTIONS-}"`], { encoding: "utf8", env: { PATH: process.env.PATH, ...env } }).stdout.trim();
+  assert.equal(run({}), `--require ${preload}`);
+  assert.equal(run({ NODE_OPTIONS: "--max-old-space-size=512" }), `--max-old-space-size=512 --require ${preload}`);
+  assert.equal(run({ NODE_OPTIONS: `--require ${preload}` }), `--require ${preload}`);
 });
