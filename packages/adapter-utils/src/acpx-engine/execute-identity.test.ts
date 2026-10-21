@@ -188,6 +188,73 @@ describe("acpx identity split and launch environment", () => {
     expect(projectAcpxInheritedHostEnvironment(inherited, "codex", false)).toEqual({});
   });
 
+  describe("operator shell env passthrough", () => {
+    const inherited = {
+      PATH: "/usr/bin:/srv/paperclip/work/okto-env/bin",
+      PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH:
+        "DOCKER_HOST, OKTO_ENV_HOME  OKTO_ENV_UNSET HOST_API_TOKEN MY_SECRET SOME_KEY not-a-name!",
+      DOCKER_HOST: "unix:///srv/paperclip/run/docker.sock",
+      OKTO_ENV_HOME: "/srv/paperclip/work/okto-env",
+      HOST_API_TOKEN: "host-token",
+      MY_SECRET: "host-secret",
+      SOME_KEY: "host-key",
+      OKTO_UNLISTED: "1",
+    };
+
+    it("projects only listed, set, non-credential names for a local target", () => {
+      expect(projectAcpxInheritedHostEnvironment(inherited, "claude", true, true)).toEqual({
+        PATH: "/usr/bin:/srv/paperclip/work/okto-env/bin",
+        DOCKER_HOST: "unix:///srv/paperclip/run/docker.sock",
+        OKTO_ENV_HOME: "/srv/paperclip/work/okto-env",
+      });
+    });
+
+    it("projects nothing extra unless passthrough is requested", () => {
+      expect(projectAcpxInheritedHostEnvironment(inherited, "claude", true)).toEqual({
+        PATH: "/usr/bin:/srv/paperclip/work/okto-env/bin",
+      });
+    });
+
+    it("never projects across a remote sandbox boundary", () => {
+      expect(projectAcpxInheritedHostEnvironment(inherited, "claude", false, true)).toEqual({});
+    });
+
+    it("passes nothing when the variable is empty", () => {
+      expect(
+        projectAcpxInheritedHostEnvironment(
+          { ...inherited, PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "" },
+          "claude",
+          true,
+          true,
+        ),
+      ).toEqual({ PATH: "/usr/bin:/srv/paperclip/work/okto-env/bin" });
+    });
+
+    it("keeps the inherited PATH and lets per-agent config env win", () => {
+      const launchEnvironment = finalizeLaunchEnvironment(
+        { OKTO_ENV_HOME: "/agent/override" },
+        [],
+        { acpxAgent: "claude", inheritHostEnvironment: true, shellEnvPassthrough: true, inheritedEnv: inherited },
+      );
+      expect(launchEnvironment.env).toEqual({
+        PATH: "/usr/bin:/srv/paperclip/work/okto-env/bin",
+        DOCKER_HOST: "unix:///srv/paperclip/run/docker.sock",
+        OKTO_ENV_HOME: "/agent/override",
+      });
+    });
+
+    it("does not pass listed names when the target is remote", () => {
+      const launchEnvironment = finalizeLaunchEnvironment({}, [], {
+        acpxAgent: "claude",
+        inheritHostEnvironment: true,
+        shellEnvPassthrough: false,
+        inheritedEnv: inherited,
+      });
+      expect(launchEnvironment.env).not.toHaveProperty("DOCKER_HOST");
+      expect(launchEnvironment.env).not.toHaveProperty("OKTO_ENV_HOME");
+    });
+  });
+
   it("keeps explicit remote adapter and run contributions while rejecting ambient authority", () => {
     const launchEnvironment = finalizeLaunchEnvironment(
       {

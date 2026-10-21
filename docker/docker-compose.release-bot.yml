@@ -69,7 +69,7 @@ services:
       # smoke-unified-login.mjs loads Playwright from here: pnpm's hoisted dir has
       # no version hash in its path.
       OKTO_ENV_PLAYWRIGHT_MODULE: "/app/node_modules/.pnpm/node_modules/playwright"
-      # codex_local agents filter their shell env; let these ambient names through
+      # codex_local and claude_local (ACP) agents filter their shell env; let these ambient names through
       # (credential-looking names are ignored by the adapter). PATH and HOME are
       # always passed.
       PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH: "DOCKER_HOST OKTO_ENV_HOME OKTO_ENV_OKTOROCKET_REPO OKTO_ENV_DC_MANAGER_REPO OKTO_ENV_BIND_ADDR OKTO_ENV_PUBLIC_HOST PLAYWRIGHT_BROWSERS_PATH OKTO_ENV_ROOTLESS OKTO_ENV_MEMORY_BUDGET OKTO_ENV_LOCK_WAIT OKTO_ENV_OFFSET_MAX OKTO_ENV_PLAYWRIGHT_MODULE"
