@@ -150,17 +150,23 @@ expose container variables to agent shells on local targets, either:
 ### Jest worker cap
 
 Jest defaults to one worker per core minus one, and an agent test run on this 24-core host
-once exhausted memory. The overlay sets `NODE_OPTIONS=--require /usr/local/lib/paperclip/jest-worker-cap.cjs`
-(and passes it through to agent shells). Claude agents never receive it: the Claude Agent SDK
-deletes `NODE_OPTIONS` from the environment of the Claude process. Their Bash tool runs
-non-login `bash -c`, which reads `BASH_ENV`, so the overlay also sets
-`BASH_ENV=/usr/local/lib/paperclip/agent-shell-env.sh` (passed through), which re-adds the
-preload. The preload adds `--maxWorkers=2` when the process
-is the Jest CLI and the caller did not pass `--maxWorkers`, `--max-workers`, `-w`, `-i` or
-`--runInBand`. A `PATH` shim would not work: `npx`, `yarn`, `pnpm` and npm scripts all run the
-repo-local `node_modules/.bin/jest` ahead of `PATH`. Not covered: Jest run inside the nested
-test stacks of the rootless daemon (separate containers), an agent whose own `env` config sets
-`NODE_OPTIONS`, and a `maxWorkers` set in a repo's Jest config (the CLI flag overrides it).
+once exhausted memory. The overlay does two things, because Claude agents never receive `NODE_OPTIONS` (the Claude
+Agent SDK deletes it from the Claude process and their Bash tool does not restore it):
+
+- It sets `NODE_OPTIONS=--require /usr/local/lib/paperclip/jest-worker-cap.cjs` (passed through to
+  agent shells), which covers the server and Codex.
+- It puts `node` and `yarn` shims first on `PATH` (`/usr/local/lib/paperclip/shims`). The `node`
+  shim starts the real Node with the same preload: `npx`, `npm`, `pnpm` and the
+  `#!/usr/bin/env node` shebang of `node_modules/.bin/jest` all find `node` through `PATH`. Yarn 1
+  runs scripts with its own `node` link, which bypasses that, so the `yarn` shim sets
+  `NODE_OPTIONS` for it. A shim on `jest` itself would not work, since those tools run the
+  repo-local `node_modules/.bin/jest` ahead of `PATH`.
+
+The preload adds `--maxWorkers=2` when the process is the Jest CLI and the caller did not pass
+`--maxWorkers`, `--max-workers`, `-w`, `-i` or `--runInBand`. Not covered: Jest run inside the
+nested test stacks of the rootless daemon (separate containers), an agent whose own `env` config
+replaces `NODE_OPTIONS` or `PATH`, a Node started by absolute path (`/usr/local/bin/node`), and a
+`maxWorkers` set in a repo's Jest config (the CLI flag overrides it).
 
 ### Memory-pressure kills (systemd-oomd)
 

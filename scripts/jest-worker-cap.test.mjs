@@ -52,18 +52,38 @@ test("does nothing for other Node programs", () => {
   assert.deepEqual(argvSeenBy(other, ["--foo"]), ["--foo"]);
 });
 
-test("agent shell hook re-adds the preload once and keeps other NODE_OPTIONS", () => {
-  const hook = path.join(path.dirname(preload), "agent-shell-env.sh");
-  // The hook only acts when the preload is installed at its image path; stub the
-  // check by running against a copy that points at this repo's file.
-  const patched = path.join(root, "agent-shell-env.sh");
+function installShim(name, realProgram) {
+  const dir = mkdtempSync(path.join(root, "shims-"));
+  const shim = path.join(dir, "jest-cap-shim.sh");
   writeFileSync(
-    patched,
-    readFileSync(hook, "utf8").replaceAll("/usr/local/lib/paperclip/jest-worker-cap.cjs", preload),
+    shim,
+    readFileSync(path.join(path.dirname(preload), "jest-cap-shim.sh"), "utf8")
+      .replaceAll("/usr/local/bin/node", process.execPath)
+      .replace("/usr/local/bin/$name", realProgram)
+      .replace("preload=/usr/local/lib/paperclip/jest-worker-cap.cjs", `preload=${preload}`),
+    { mode: 0o755 },
   );
-  const run = (env) =>
-    spawnSync("bash", ["-c", `. "${patched}"; . "${patched}"; echo "\${NODE_OPTIONS-}"`], { encoding: "utf8", env: { PATH: process.env.PATH, ...env } }).stdout.trim();
-  assert.equal(run({}), `--require ${preload}`);
-  assert.equal(run({ NODE_OPTIONS: "--max-old-space-size=512" }), `--max-old-space-size=512 --require ${preload}`);
-  assert.equal(run({ NODE_OPTIONS: `--require ${preload}` }), `--require ${preload}`);
+  const linked = path.join(dir, name);
+  if (name !== "jest-cap-shim.sh") symlinkSync(shim, linked);
+  return linked;
+}
+
+test("node shim starts Node with the preload so the Jest CLI is capped", () => {
+  const shim = installShim("node");
+  const run = (script, args) => {
+    const result = spawnSync(shim, [script, ...args], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  assert.deepEqual(run(jestCli, ["a.test.js"]), ["--maxWorkers=2", "a.test.js"]);
+  assert.deepEqual(run(other, ["--foo"]), ["--foo"]);
+});
+
+test("yarn shim runs the real yarn with the preload in NODE_OPTIONS, keeping existing options", () => {
+  const fakeYarn = path.join(root, "fake-yarn.sh");
+  writeFileSync(fakeYarn, '#!/bin/sh\necho "$NODE_OPTIONS|$*"\n', { mode: 0o755 });
+  const shim = installShim("yarn", fakeYarn);
+  const run = (env) => spawnSync(shim, ["jest", "x"], { encoding: "utf8", env: { PATH: process.env.PATH, ...env } }).stdout.trim();
+  assert.equal(run({}), `--require ${preload}|jest x`);
+  assert.equal(run({ NODE_OPTIONS: "--max-old-space-size=512" }), `--max-old-space-size=512 --require ${preload}|jest x`);
 });
