@@ -236,6 +236,9 @@ RUN if [ "$INSTALL_PLAYWRIGHT_BROWSERS" = "true" ]; then \
 ENV PLAYWRIGHT_BROWSERS_PATH=${INSTALL_PLAYWRIGHT_BROWSERS:+/opt/ms-playwright}
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
+# Jest worker cap, preloaded only when an overlay sets NODE_OPTIONS=--require to it
+# (docker/docker-compose.release-bot.yml). Inert otherwise.
+COPY scripts/jest-worker-cap.cjs /usr/local/lib/paperclip/jest-worker-cap.cjs
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 COPY --chown=node:node --from=build /app /app
