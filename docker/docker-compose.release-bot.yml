@@ -46,6 +46,9 @@ services:
     cgroup_parent: paperclip.slice
     mem_limit: "${PAPERCLIP_MEM_LIMIT:-16g}"
     memswap_limit: "${PAPERCLIP_MEM_LIMIT:-16g}"
+    # Kernel OOM-killer priority: raised so that when the host is out of memory,
+    # agent work dies before the okto-ops release box (its services run at -800).
+    oom_score_adj: 300
     environment:
       USER_UID: "${PAPERCLIP_UID:-1001}"
       USER_GID: "${PAPERCLIP_GID:-1001}"

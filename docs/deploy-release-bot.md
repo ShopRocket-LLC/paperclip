@@ -166,6 +166,10 @@ Nothing else is monitored (`oomctl` lists only those cgroups) and nothing is swa
 never oomd targets. When the container is killed, its restart policy brings it back; a kill
 takes every agent run in it down, which is the trade for the host staying up.
 
+If the kernel OOM killer runs anyway, the overlay sets `oom_score_adj: 300` on this container
+so its processes are chosen before the okto-ops release box (`-800` there). The rootless
+test stacks keep the default score.
+
 ### Security model
 
 Agents have the privileges of an unprivileged host account and of its rootless daemon:
