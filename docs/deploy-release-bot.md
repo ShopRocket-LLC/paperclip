@@ -128,7 +128,9 @@ expose container variables to agent shells on local targets, either:
 - set `PAPERCLIP_AGENT_SHELL_ENV_PASSTHROUGH` on the container (comma-separated names, for
   example `DOCKER_HOST,PLAYWRIGHT_BROWSERS_PATH,OKTO_ENV_HOME,OKTO_ENV_OKTOROCKET_REPO,OKTO_ENV_DC_MANAGER_REPO,OKTO_ENV_BIND_ADDR,OKTO_ENV_PUBLIC_HOST`).
   Names containing `key`, `secret` or `token` (case-insensitive) are ignored, as for the
-  per-agent env. Remote targets never receive them. `PATH` is always inherited. Or
+  per-agent env. Remote targets never receive them. `PATH` is always inherited, and
+  `/etc/profile.d/okto-env.sh` re-adds the okto-env bin dir for login shells (`bash -l`),
+  which otherwise reset `PATH`. Or
 - set the same variables in each agent's `env` config in Paperclip.
 
 ### Security model

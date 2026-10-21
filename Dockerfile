@@ -201,6 +201,15 @@ RUN if [ "$INSTALL_AGENT_TOOLS" = "1" ] || [ "$INSTALL_AGENT_TOOLS" = "true" ]; 
     apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin docker-buildx-plugin perl jq lsof; \
     rm -rf /var/lib/apt/lists/*; \
     docker --version; docker compose version; docker buildx version; \
+    printf '%s\n' \
+      '# okto-env controller bin dir. /etc/profile resets PATH for login shells' \
+      '# (bash -l), so append it again here when it is not already present.' \
+      'okto_env_bin="${OKTO_ENV_HOME:-/srv/paperclip/work/okto-env}/bin"' \
+      'case ":$PATH:" in *":$okto_env_bin:"*) ;; *) PATH="$PATH:$okto_env_bin" ;; esac' \
+      'export PATH' \
+      'unset okto_env_bin' \
+      > /etc/profile.d/okto-env.sh; \
+    chmod 0644 /etc/profile.d/okto-env.sh; \
     if [ "$INSTALL_DOTNET" = "1" ] || [ "$INSTALL_DOTNET" = "true" ]; then \
       apt-get update; \
       apt-get install -y --no-install-recommends libicu76; \
